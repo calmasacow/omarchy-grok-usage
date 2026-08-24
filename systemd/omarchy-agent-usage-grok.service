@@ -1,0 +1,13 @@
+[Unit]
+Description=Omarchy Grok usage collector for the agents panel
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.config/omarchy/agents/omarchy-agent-usage-grok-watch
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

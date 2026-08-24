@@ -1,0 +1,3 @@
+#!/bin/bash
+# Keep the Grok agents-panel collector running after login.
+systemctl --user start omarchy-agent-usage-grok.service >/dev/null 2>&1 || true
