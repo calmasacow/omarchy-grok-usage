@@ -1,57 +1,87 @@
-# Omarchy Grok usage
+# Grok Usage
 
-Add **Grok** to Omarchy’s stock agents widget — the robot head next to Bluetooth and Wi-Fi.
+![Grok Usage](preview.png)
 
-Omarchy’s packaged panel already covers Claude, Codex, and Fireworks. It only *displays* JSON dropped in `~/.local/state/omarchy/agents/usage/`. This repo ships the missing Grok collector so that panel grows a Grok tab. No plugin clone, no edits under `/usr/share/omarchy`.
+Grok on the Omarchy agents panel. Opens on your default coding agent.
 
-## What you get
+**ID:** `calmasacow.grok-usage`  
+**Author:** James Barnette  
+**License:** MIT  
+**Version:** 0.2.0
 
-- SuperGrok **weekly** pool (same source Grok Build uses for `/usage`)
-- Plan name (SuperGrok, SuperGrok Pro, SuperGrok Heavy, …)
-- Local prompt, session, and token stats from `~/.grok/sessions`
-- Tokens by day (last week) and by model
-- Prepaid leftover credits, when the ledger is actually non-zero
+Stock Omarchy already shows Claude, Codex, and Fireworks on the robot-head
+Agents widget. This plugin is that same panel, plus:
 
-Right-click on the robot still launches your default coding agent. Left-click opens the usage panel; if more than one agent has data, switch with the chips or a middle-click.
+- a **Grok** collector (SuperGrok weekly pool, plan name, local session stats)
+- the panel **opens on your default coding agent** (`omarchy default agent`)
+  instead of the first id alphabetically
+
+Enabling it replaces `omarchy.agents` in the bar. Removing it puts the stock
+widget back.
+
+Unofficial. Not affiliated with xAI or Omarchy.
 
 ## Install
 
-On an Omarchy machine, with Grok Build already signed in (`grok login`):
+Grok Build must already be signed in (`grok login`).
 
-```bash
-git clone https://github.com/calmasacow/omarchy-grok-usage.git
-cd omarchy-grok-usage
-./install.sh
+```sh
+omarchy plugin add https://github.com/calmasacow/omarchy-grok-usage.git --enable
 ```
 
-Then left-click the robot head. You should see a **Grok** chip next to Claude/Codex/Fireworks.
+Left-click the robot head. The Grok chip should be selected if your default
+agent is `grok`.
 
-`install.sh` copies the collector and watcher into `~/.config/omarchy/`, enables a user systemd service, writes `grok.json`, and asks the panel to rescan.
+## Usage
 
-## Uninstall
+| Control | Action |
+|---|---|
+| Left-click | Open / close the usage panel |
+| Right-click | Launch the default coding agent |
+| Middle-click | Next subscription |
+| `h` / `l` | Switch subscription |
+| `r` or Enter | Refresh |
+| Esc | Close |
 
-```bash
-./uninstall.sh
+## Remove
+
+```sh
+omarchy plugin remove calmasacow.grok-usage
+```
+
+If you previously installed the collector-only script (0.1), stop the watcher too:
+
+```sh
+systemctl --user disable --now omarchy-agent-usage-grok.service
+rm -f ~/.config/systemd/user/omarchy-agent-usage-grok.service
+rm -f ~/.config/omarchy/agents/omarchy-agent-usage-grok
+rm -f ~/.config/omarchy/agents/omarchy-agent-usage-grok-watch
+rm -f ~/.config/omarchy/hooks/post-boot.d/start-grok-usage-collector.hook
 ```
 
 ## How it works
 
-Packaged `omarchy-agent-usage-update` only scans `$OMARCHY_PATH/bin/`, so Grok cannot live there without waiting on an upstream collector. This watcher writes `~/.local/state/omarchy/agents/usage/grok.json` whenever the panel regenerates its other records, and at least every 15 minutes.
+The stock panel only *displays* JSON in `~/.local/state/omarchy/agents/usage/`.
+Packaged `omarchy-agent-usage-update` scans `$OMARCHY_PATH/bin`, so Grok cannot
+live there. This plugin runs `scripts/omarchy-agent-usage-grok` after each
+refresh and writes `grok.json`.
+
+The collector reads the login already in `~/.grok/auth.json` and asks the same
+CLI-proxy billing endpoints Grok Build uses for `/usage`. No tokens are stored
+in this repository.
 
 | File | Role |
 |---|---|
-| `collectors/omarchy-agent-usage-grok` | Session scan + SuperGrok billing probe |
-| `collectors/omarchy-agent-usage-grok-watch` | Refresh on sibling usage writes, or every 15 minutes |
-| `systemd/omarchy-agent-usage-grok.service` | Keep the watcher running |
-
-No tokens are stored in this repo. The collector reads the login already in `~/.grok/auth.json`.
+| `Panel.qml` | Bar icon + usage dashboard |
+| `Main.qml` | Discover records, refresh collectors, prefer default agent |
+| `scripts/omarchy-agent-usage-grok` | Session scan + SuperGrok billing probe |
 
 ## Requirements
 
 - [Omarchy](https://omarchy.org/)
 - Grok Build signed in (`grok login`)
-- `python3` and `inotifywait` (`inotify-tools`)
+- `python3`
 
 ## License
 
-MIT.
+MIT. Panel QML is adapted from Omarchy's first-party Agents plugin.
