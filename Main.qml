@@ -14,6 +14,9 @@ Item {
 
   readonly property string home: Quickshell.env("HOME") || ""
   readonly property string usageDir: (Quickshell.env("XDG_STATE_HOME") || home + "/.local/state") + "/omarchy/agents/usage"
+  readonly property int maxHelperOutput: 1024 * 1024
+  readonly property int maxAgentIdLen: 64
+  readonly property int maxAgentFiles: 16
   readonly property string pluginDir: {
     var raw = String(Qt.resolvedUrl("."))
       .replace(/^file:\/\//, "")
@@ -24,7 +27,21 @@ Item {
       return raw
     }
   }
-  readonly property string grokCollector: pluginDir + "/scripts/omarchy-agent-usage-grok"
+  readonly property string grokCollector: {
+    var dir = String(root.pluginDir || "")
+    if (dir === "" || dir.indexOf("\x00") >= 0) return ""
+    var parts = dir.split("/")
+    for (var i = 0; i < parts.length; i++) if (parts[i] === "..") return ""
+    return dir + "/scripts/omarchy-agent-usage-grok"
+  }
+  readonly property string defaultAgentPath: (Quickshell.env("XDG_CONFIG_HOME") || (root.home + "/.config")) + "/omarchy/defaults/agent"
+
+  property string defaultAgentBuf: ""
+  property bool defaultAgentOverflow: false
+  property string listBuf: ""
+  property bool listOverflow: false
+  property string syncBuf: ""
+  property bool syncOverflow: false
 
   // ------------------------------------------------------------- discovery
 
@@ -35,45 +52,101 @@ Item {
 
   FileView {
     id: defaultAgentFile
-    path: (Quickshell.env("XDG_CONFIG_HOME") || (root.home + "/.config")) + "/omarchy/defaults/agent"
+    path: root.defaultAgentPath
     watchChanges: true
+    preload: false
     printErrors: false
-    onLoaded: root.defaultAgentId = String(text() || "").trim()
+    onFileChanged: root.reloadDefaultAgent()
   }
 
   Process {
-    running: true
-    command: ["cat", (Quickshell.env("XDG_CONFIG_HOME") || (root.home + "/.config")) + "/omarchy/defaults/agent"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var id = String(text || "").trim()
-        if (id !== "") root.defaultAgentId = id
+    id: defaultAgentProcess
+    running: false
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        if (root.defaultAgentOverflow) return
+        var piece = String(chunk || "")
+        if (root.defaultAgentBuf.length + piece.length > 1024) {
+          root.defaultAgentOverflow = true
+          defaultAgentProcess.running = false
+          return
+        }
+        root.defaultAgentBuf += piece
       }
+    }
+    onExited: {
+      if (root.defaultAgentOverflow) return
+      try {
+        var parsed = JSON.parse(root.defaultAgentBuf)
+        var id = parsed && parsed.ok === true ? String(parsed.text || "").trim() : ""
+        if (root.isSafeAgentId(id)) root.defaultAgentId = id
+      } catch (e) {}
     }
   }
 
   Process {
     id: listProcess
     running: false
-    command: ["find", root.usageDir, "-maxdepth", "1", "-name", "*.json", "-printf", "%f\n"]
-
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.applyAgentListing(text)
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        if (root.listOverflow) return
+        var piece = String(chunk || "")
+        if (root.listBuf.length + piece.length > root.maxHelperOutput) {
+          root.listOverflow = true
+          listProcess.running = false
+          return
+        }
+        root.listBuf += piece
+      }
+    }
+    onExited: {
+      if (root.listOverflow) return
+      root.applyAgentListing(root.listBuf)
     }
   }
 
+  function isSafeAgentId(id) {
+    var value = String(id || "")
+    if (value.length < 1 || value.length > root.maxAgentIdLen) return false
+    return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value)
+  }
+
+  function usageRecordPath(id) {
+    if (!root.isSafeAgentId(id)) return ""
+    return root.usageDir + "/" + id + ".json"
+  }
+
+  function reloadDefaultAgent() {
+    if (root.grokCollector === "") return
+    root.defaultAgentBuf = ""
+    root.defaultAgentOverflow = false
+    if (defaultAgentProcess.running) defaultAgentProcess.running = false
+    defaultAgentProcess.command = ["python3", "-B", root.grokCollector, "--load-text", root.defaultAgentPath]
+    defaultAgentProcess.running = true
+  }
+
   function rescanAgents() {
-    if (!listProcess.running) listProcess.running = true
+    if (root.grokCollector === "") return
+    if (listProcess.running) return
+    root.listBuf = ""
+    root.listOverflow = false
+    listProcess.command = ["python3", "-B", root.grokCollector, "--list-usage", root.usageDir]
+    listProcess.running = true
   }
 
   function applyAgentListing(output) {
     var ids = []
-    var lines = String(output || "").split("\n")
-    for (var i = 0; i < lines.length; i++) {
-      var name = lines[i].trim()
-      if (name.slice(-5) === ".json") ids.push(name.slice(0, -5))
+    try {
+      var parsed = JSON.parse(String(output || ""))
+      var listed = parsed && parsed.ids ? parsed.ids : []
+      for (var i = 0; i < listed.length && ids.length < root.maxAgentFiles; i++) {
+        var id = String(listed[i] || "")
+        if (root.isSafeAgentId(id)) ids.push(id)
+      }
+    } catch (e) {
+      return
     }
     ids.sort()
     // Same list, same objects: reassigning the model would tear down every
@@ -88,7 +161,8 @@ Item {
     delegate: Agent {
       required property var modelData
       agentId: modelData
-      path: root.usageDir + "/" + modelData + ".json"
+      path: root.usageRecordPath(modelData)
+      reader: root.grokCollector
       onRecordChanged: root.recordsChanged()
     }
 
@@ -140,10 +214,7 @@ Item {
   }
 
   Component.onCompleted: {
-    try {
-      var current = String(defaultAgentFile.text() || "").trim()
-      if (current !== "") root.defaultAgentId = current
-    } catch (e) {}
+    root.reloadDefaultAgent()
     rescanAgents()
     if (syncConfigured()) scheduleSync()
   }
@@ -173,9 +244,12 @@ Item {
       }
     }
 
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: if (text.trim() !== "") console.warn("agents", text.trim())
+    stderr: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        var piece = String(chunk || "")
+        if (piece.length > 0 && piece.length < 4096) console.warn("agents", piece.trim())
+      }
     }
   }
 
@@ -200,11 +274,11 @@ Item {
     else if (kind === "limits") grokFlags = " --limits-only"
     // Packaged update only scans $OMARCHY_PATH/bin. Run the bundled Grok
     // collector afterwards so the stock panel contract grows a Grok tab.
-    var grokPart = providerEnabled("grok")
+    var grokPart = providerEnabled("grok") && root.grokCollector !== ""
       ? 'if [ -f "$0" ]; then PYTHONDONTWRITEBYTECODE=1 python3 -B "$0" --write' + grokFlags + '; fi; '
       : ""
     var script = 'omarchy-agent-usage-update "$@"; status=$?; ' + grokPart + 'exit $status'
-    return ["bash", "-c", script, grokCollector].concat(args)
+    return ["bash", "-c", script, root.grokCollector].concat(args)
   }
 
   function runUpdate(kind, agentIds) {
@@ -390,13 +464,28 @@ Item {
     running: false
     onRunningChanged: root.updateSyncRunning()
     onExited: function(exitCode) {
+      if (root.syncOverflow) {
+        if (root.syncConfigured()) root.syncStatusText = "Usage sync scan failed"
+        root.finishSyncRun()
+        return
+      }
       if (exitCode !== 0 && root.syncConfigured()) root.syncStatusText = "Usage sync scan failed"
+      else root.parseSyncScanOutput(root.syncBuf)
       root.finishSyncRun()
     }
 
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.parseSyncScanOutput(text)
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) {
+        if (root.syncOverflow) return
+        var piece = String(chunk || "")
+        if (root.syncBuf.length + piece.length > root.maxHelperOutput) {
+          root.syncOverflow = true
+          syncScanProcess.running = false
+          return
+        }
+        root.syncBuf += piece
+      }
     }
 
     stderr: StdioCollector {
@@ -409,6 +498,7 @@ Item {
     id: syncSnapshotFile
     path: root.syncSnapshotPath
     watchChanges: false
+    preload: false
     atomicWrites: true
     printErrors: false
   }
@@ -417,8 +507,8 @@ Item {
     id: hostnameFile
     path: "/etc/hostname"
     watchChanges: false
+    preload: false
     printErrors: false
-    onLoaded: root.detectedHostname = String(text() || "").trim()
   }
 
   function parseSyncEnabled(value) {
@@ -475,12 +565,13 @@ Item {
   }
 
   function startSyncScan() {
-    if (!syncConfigured()) {
+    if (!syncConfigured() || root.grokCollector === "") {
       finishSyncRun()
       return
     }
-    var script = "dir=$0; [[ -d \"$dir\" ]] || exit 0; shopt -s nullglob; for f in \"$dir\"/*.json; do [[ -f \"$f\" ]] || continue; printf '===%s===\\n' \"$f\"; cat \"$f\"; printf '\\n=== EOM ===\\n'; done"
-    syncScanProcess.command = ["bash", "-c", script, root.syncEffectiveDir]
+    root.syncBuf = ""
+    root.syncOverflow = false
+    syncScanProcess.command = ["python3", "-B", root.grokCollector, "--load-snapshots", root.syncEffectiveDir]
     syncScanProcess.running = true
   }
 
@@ -493,12 +584,25 @@ Item {
 
   function expandPath(path) {
     var value = String(path || "").trim()
-    if (value === "") return ""
+    if (value === "" || value.indexOf("\x00") >= 0) return ""
+    if (value.indexOf("\n") >= 0 || value.indexOf("\r") >= 0) return ""
     if (value === "~") return home
-    if (value.indexOf("~/") === 0) return home + value.substring(1)
-    if (value.indexOf("$HOME/") === 0) return home + value.substring(5)
-    if (value.charAt(0) !== "/") return home + "/" + value
-    return value
+    if (value.indexOf("~/") === 0) value = home + value.substring(1)
+    else if (value.indexOf("$HOME/") === 0) value = home + value.substring(5)
+    else if (value.charAt(0) !== "/") value = home + "/" + value
+    var parts = value.split("/")
+    var out = []
+    for (var i = 0; i < parts.length; i++) {
+      var part = parts[i]
+      if (part === "" || part === ".") continue
+      if (part === "..") {
+        if (out.length === 0) return ""
+        out.pop()
+        continue
+      }
+      out.push(part)
+    }
+    return "/" + out.join("/")
   }
 
   function safeDeviceId(raw) {
@@ -519,40 +623,17 @@ Item {
   }
 
   function parseSyncScanOutput(output) {
-    var lines = String(output || "").split("\n")
     var snapshots = []
-    var currentPath = ""
-    var currentJson = []
-
-    function flush() {
-      if (currentPath === "") return
-      var raw = currentJson.join("\n").trim()
-      try {
-        var parsed = JSON.parse(raw)
-        if (parsed && parsed.providers) snapshots.push(parsed)
-      } catch (e) {
-        console.warn("agents/sync", "Ignoring bad snapshot", currentPath, e)
+    try {
+      var parsed = JSON.parse(String(output || ""))
+      var listed = parsed && parsed.snapshots ? parsed.snapshots : []
+      for (var i = 0; i < listed.length && snapshots.length < 32; i++) {
+        if (listed[i] && listed[i].providers) snapshots.push(listed[i])
       }
-      currentPath = ""
-      currentJson = []
+    } catch (e) {
+      console.warn("agents/sync", "Ignoring bad snapshot listing", e)
+      return
     }
-
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i]
-      var start = line.match(/^===(.+)===$/)
-      if (start && line !== "=== EOM ===") {
-        flush()
-        currentPath = start[1]
-        currentJson = []
-        continue
-      }
-      if (line === "=== EOM ===") {
-        flush()
-        continue
-      }
-      if (currentPath !== "") currentJson.push(line)
-    }
-    flush()
 
     aggregateData = aggregateSnapshots(snapshots)
     syncStatusText = ""

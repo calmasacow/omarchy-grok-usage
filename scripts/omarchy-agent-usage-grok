@@ -23,10 +23,11 @@ import datetime as dt
 import fcntl
 import json
 import os
+import stat
 import sys
-import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -34,12 +35,96 @@ from typing import Any
 AGENT_ID = "grok"
 AGENT_NAME = "Grok"
 AUTH_HELP = "Run `grok login` to restore subscription usage."
+BILLING_HOST = "cli-chat-proxy.grok.com"
 BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings"
 TOKEN_AUTH = "xai-grok-cli"
 PROBE_MIN_INTERVAL_SECONDS = 15
 SCAN_REUSE_SECONDS = 20
 LIMITS_ONLY_REUSE_SECONDS = 900
+MAX_AUTH_BYTES = 64 * 1024
+MAX_VERSION_BYTES = 8 * 1024
+MAX_CACHE_BYTES = 256 * 1024
+MAX_USAGE_RECORD_BYTES = 256 * 1024
+MAX_SNAPSHOT_BYTES = 256 * 1024
+MAX_DEFAULT_AGENT_BYTES = 256
+MAX_REMOTE_BYTES = 1024 * 1024
+MAX_STDOUT_BYTES = 1024 * 1024
+MAX_SESSION_FILES = 400
+MAX_JSONL_BYTES = 4 * 1024 * 1024
+MAX_SUMMARY_BYTES = 64 * 1024
+MAX_USAGE_FILES = 16
+MAX_SNAPSHOT_FILES = 32
+AGENT_ID_MAX_LEN = 64
+CREDENTIAL_HEADERS = frozenset({
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "x-xai-token-auth",
+  "x-userid",
+})
+
+
+def origin_of(url: str) -> tuple[str, str, int] | None:
+  parts = urllib.parse.urlsplit(url)
+  scheme = (parts.scheme or "").lower()
+  host = (parts.hostname or "").lower()
+  if scheme not in ("http", "https") or not host:
+    return None
+  try:
+    port = parts.port or (443 if scheme == "https" else 80)
+  except ValueError:
+    return None
+  return scheme, host, port
+
+
+def same_origin(current: str, nxt: str) -> bool:
+  left = origin_of(current)
+  right = origin_of(nxt)
+  return left is not None and left == right
+
+
+def allowed_request_url(url: str) -> bool:
+  origin = origin_of(url)
+  return origin == ("https", BILLING_HOST, 443)
+
+
+class SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+  """Refuse redirects that would change scheme, host, or port.
+
+  urllib copies Authorization onto the follow-up request. A 3xx to another
+  origin would send the Grok token there. Same-origin https hops stay allowed.
+  """
+
+  def redirect_request(self, req, fp, code, msg, headers, newurl):
+    if not same_origin(req.full_url, newurl) or not allowed_request_url(newurl):
+      raise urllib.error.HTTPError(
+        newurl, code, "cross-origin redirect refused", headers, fp,
+      )
+    nxt = super().redirect_request(req, fp, code, msg, headers, newurl)
+    if nxt is None:
+      return None
+    if not same_origin(req.full_url, nxt.full_url):
+      for name in list(nxt.headers):
+        if name.lower() in CREDENTIAL_HEADERS:
+          del nxt.headers[name]
+    return nxt
+
+
+def _billing_opener() -> urllib.request.OpenerDirector:
+  opener = urllib.request.OpenerDirector()
+  for handler in (
+    SameOriginRedirectHandler(),
+    urllib.request.HTTPSHandler(),
+    urllib.request.HTTPErrorProcessor(),
+    urllib.request.HTTPDefaultErrorHandler(),
+    urllib.request.UnknownHandler(),
+  ):
+    opener.add_handler(handler)
+  return opener
+
+
+_OPENER = _billing_opener()
 
 
 def grok_home() -> Path:
@@ -47,6 +132,82 @@ def grok_home() -> Path:
   if raw:
     return Path(os.path.expandvars(os.path.expanduser(raw)))
   return Path.home() / ".grok"
+
+
+def is_safe_agent_id(value: str) -> bool:
+  if not value or len(value) > AGENT_ID_MAX_LEN:
+    return False
+  head = value[0]
+  if not (head.isalnum()):
+    return False
+  for ch in value:
+    if not (ch.isalnum() or ch in "._-"):
+      return False
+  return True
+
+
+def open_regular(path: Path, max_bytes: int) -> bytes:
+  """Read a regular file without following a symlink or blocking on a FIFO."""
+  flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+  fd = os.open(os.fspath(path), flags)
+  try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+      raise OSError("not a regular file")
+    data = b""
+    remaining = max_bytes + 1
+    while remaining > 0:
+      chunk = os.read(fd, min(65536, remaining))
+      if not chunk:
+        break
+      data += chunk
+      remaining -= len(chunk)
+  finally:
+    os.close(fd)
+  if len(data) > max_bytes:
+    raise OSError("file too large")
+  return data
+
+
+def read_json_object(path: Path, max_bytes: int) -> dict[str, Any] | None:
+  try:
+    data = json.loads(open_regular(path, max_bytes).decode("utf-8"))
+  except Exception:
+    return None
+  return data if isinstance(data, dict) else None
+
+
+def emit_json(payload: Any, max_bytes: int = MAX_STDOUT_BYTES) -> int:
+  raw = (json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+  if len(raw) > max_bytes:
+    sys.stdout.buffer.write(b'{"ok":false,"error":"helper response too large"}\n')
+    return 1
+  sys.stdout.buffer.write(raw)
+  return 0
+
+
+def fetch_json(url: str, headers: dict[str, str], timeout: float) -> dict[str, Any]:
+  if not allowed_request_url(url):
+    raise ValueError("refusing unexpected billing host")
+  request = urllib.request.Request(url, headers=headers, method="GET")
+  try:
+    with _OPENER.open(request, timeout=timeout) as response:
+      if not allowed_request_url(getattr(response, "geturl", lambda: url)()):
+        raise ValueError("redirected off the billing host")
+      raw = response.read(MAX_REMOTE_BYTES + 1)
+  except urllib.error.HTTPError as error:
+    if error.fp is not None:
+      try:
+        error.read(MAX_REMOTE_BYTES + 1)
+      except Exception:
+        pass
+    raise
+  if len(raw) > MAX_REMOTE_BYTES:
+    raise ValueError("response too large")
+  payload = json.loads(raw.decode("utf-8", errors="replace"))
+  if not isinstance(payload, dict):
+    raise ValueError("invalid JSON object")
+  return payload
 
 
 def cache_root() -> Path:
@@ -63,10 +224,7 @@ def usage_dir() -> Path:
 
 
 def client_version() -> str:
-  try:
-    data = json.loads((grok_home() / "version.json").read_text(encoding="utf-8"))
-  except Exception:
-    return os.environ.get("GROK_CLIENT_VERSION", "1.0.5")
+  data = read_json_object(grok_home() / "version.json", MAX_VERSION_BYTES)
   if isinstance(data, dict):
     value = str(data.get("version") or "").strip()
     if value:
@@ -155,37 +313,64 @@ def parse_iso(value: Any) -> dt.datetime | None:
 
 
 def write_json(path: Path, payload: dict[str, Any], mode: int = 0o644) -> None:
-  handle_fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
-  tmp = Path(tmp_name)
+  path.parent.mkdir(parents=True, exist_ok=True)
+  raw = (json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+  tmp = path.parent / f".{path.name}.{os.urandom(12).hex()}.tmp"
+  flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+  fd = os.open(os.fspath(tmp), flags, mode)
   try:
-    with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
-      handle.write(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
-    tmp.chmod(mode)
-    tmp.replace(path)
+    os.write(fd, raw)
+    os.fsync(fd)
+  except BaseException:
+    os.close(fd)
+    tmp.unlink(missing_ok=True)
+    raise
+  os.close(fd)
+  try:
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
   except BaseException:
     tmp.unlink(missing_ok=True)
     raise
 
 
 def read_fresh_json(path: Path, max_age_seconds: float) -> dict[str, Any] | None:
-  if max_age_seconds <= 0 or not path.exists():
+  if max_age_seconds <= 0:
     return None
   try:
-    if time.time() - path.stat().st_mtime <= max_age_seconds:
-      data = json.loads(path.read_text(encoding="utf-8"))
-      return data if isinstance(data, dict) else None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(os.fspath(path), flags)
+  except OSError:
+    return None
+  try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+      return None
+    if time.time() - info.st_mtime > max_age_seconds:
+      return None
+    data = b""
+    remaining = MAX_CACHE_BYTES + 1
+    while remaining > 0:
+      chunk = os.read(fd, min(65536, remaining))
+      if not chunk:
+        break
+      data += chunk
+      remaining -= len(chunk)
+  finally:
+    os.close(fd)
+  if len(data) > MAX_CACHE_BYTES:
+    return None
+  try:
+    parsed = json.loads(data.decode("utf-8"))
   except Exception:
     return None
-  return None
+  return parsed if isinstance(parsed, dict) else None
 
 
 def session_is_subagent(session_dir: Path) -> bool:
   for name in ("summary.json", "prompt_context.json"):
     path = session_dir / name
-    try:
-      data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-      continue
+    data = read_json_object(path, MAX_SUMMARY_BYTES)
     if not isinstance(data, dict):
       continue
     candidates = [
@@ -315,15 +500,33 @@ def scan_sessions(sessions_path: Path) -> dict[str, Any]:
   today_prompt_count = 0
   today_token_total = 0
 
-  files = sessions_path.rglob("updates.jsonl") if sessions_path.is_dir() else []
-  for path in files:
-    session_dir = path.parent
-    if session_is_subagent(session_dir):
-      continue
-    session_key = session_dir.name
-    try:
-      with path.open("r", encoding="utf-8", errors="replace") as handle:
-        for line_number, line in enumerate(handle, 1):
+  files_seen = 0
+  if sessions_path.is_dir() and not sessions_path.is_symlink():
+    for dirpath, dirnames, filenames in os.walk(sessions_path, followlinks=False):
+      dirnames[:] = [
+        name for name in dirnames
+        if not os.path.islink(os.path.join(dirpath, name))
+      ]
+      if "updates.jsonl" not in filenames:
+        continue
+      path = Path(dirpath) / "updates.jsonl"
+      if path.is_symlink():
+        continue
+      files_seen += 1
+      if files_seen > MAX_SESSION_FILES:
+        break
+      session_dir = path.parent
+      if session_is_subagent(session_dir):
+        continue
+      session_key = session_dir.name
+      try:
+        raw = open_regular(path, MAX_JSONL_BYTES)
+      except Exception as exc:
+        print(f"omarchy-agent-usage-grok: ignoring {path}: {exc}", file=sys.stderr)
+        continue
+      try:
+        text = raw.decode("utf-8", errors="replace")
+        for line_number, line in enumerate(text.splitlines(), 1):
           if "turn_completed" not in line:
             continue
           try:
@@ -377,8 +580,8 @@ def scan_sessions(sessions_path: Path) -> dict[str, Any]:
             today_prompt_count += 1
             today_sessions.add(session_key)
             today_token_total += prompt_total
-    except Exception as exc:
-      print(f"omarchy-agent-usage-grok: ignoring {path}: {exc}", file=sys.stderr)
+      except Exception as exc:
+        print(f"omarchy-agent-usage-grok: ignoring {path}: {exc}", file=sys.stderr)
 
   return {
     "todayPrompts": today_prompt_count,
@@ -413,10 +616,7 @@ def cached_scan(sessions_path: Path, max_age_seconds: float) -> dict[str, Any]:
 def oauth_login() -> dict[str, Any] | None:
   """Pick the live grok.com OIDC session. Skip API-key entries: those are
   console keys and do not carry the SuperGrok weekly pool."""
-  try:
-    data = json.loads((grok_home() / "auth.json").read_text(encoding="utf-8"))
-  except Exception:
-    return None
+  data = read_json_object(grok_home() / "auth.json", MAX_AUTH_BYTES)
   if not isinstance(data, dict):
     return None
 
@@ -583,13 +783,9 @@ def jwt_tier_label(access_token: str) -> str:
 
 
 def fetch_tier_display(access_token: str, user_id: str) -> str:
-  request = urllib.request.Request(SETTINGS_URL, headers=auth_headers(access_token, user_id))
   try:
-    with urllib.request.urlopen(request, timeout=10) as response:
-      payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    payload = fetch_json(SETTINGS_URL, auth_headers(access_token, user_id), timeout=10)
   except Exception:
-    return ""
-  if not isinstance(payload, dict):
     return ""
   for key in ("subscription_tier_display", "subscriptionTierDisplay", "subscription_tier"):
     value = str(payload.get(key) or "").strip()
@@ -618,10 +814,8 @@ def parse_tier(payload: dict[str, Any], config: dict[str, Any], access_token: st
 
 
 def probe_billing(access_token: str, user_id: str) -> dict[str, Any]:
-  request = urllib.request.Request(BILLING_URL, headers=auth_headers(access_token, user_id))
   try:
-    with urllib.request.urlopen(request, timeout=15) as response:
-      payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    payload = fetch_json(BILLING_URL, auth_headers(access_token, user_id), timeout=15)
   except urllib.error.HTTPError as error:
     if error.code in (401, 403):
       return {"ok": False, "auth": True, "helpText": "Grok rejected the saved sign-in. Run `grok login`."}
@@ -632,9 +826,6 @@ def probe_billing(access_token: str, user_id: str) -> dict[str, Any]:
       "transport": True,
       "helpText": "Couldn't reach Grok's billing endpoint. Retrying shortly.",
     }
-
-  if not isinstance(payload, dict):
-    return {"ok": False, "helpText": "Grok billing returned an invalid response."}
   config = payload.get("config")
   if not isinstance(config, dict):
     return {"ok": False, "helpText": "Grok billing returned no credits config."}
@@ -743,23 +934,107 @@ def build_record(stats: dict[str, Any], limits: dict[str, Any]) -> dict[str, Any
   return record
 
 
+def load_json_file(path: Path, max_bytes: int) -> dict[str, Any] | None:
+  name = path.name
+  if not name.endswith(".json") or not is_safe_agent_id(name[:-5]):
+    return None
+  return read_json_object(path, max_bytes)
+
+
+def list_usage_records(usage_path: Path) -> dict[str, Any]:
+  ids: list[str] = []
+  if not usage_path.is_dir() or usage_path.is_symlink():
+    return {"ids": ids}
+  try:
+    names = sorted(os.listdir(usage_path))
+  except OSError:
+    return {"ids": ids}
+  for name in names:
+    if len(ids) >= MAX_USAGE_FILES:
+      break
+    if not name.endswith(".json"):
+      continue
+    agent_id = name[:-5]
+    if not is_safe_agent_id(agent_id):
+      continue
+    path = usage_path / name
+    if path.is_symlink():
+      continue
+    try:
+      open_regular(path, MAX_USAGE_RECORD_BYTES)
+    except OSError:
+      continue
+    ids.append(agent_id)
+  return {"ids": ids}
+
+
+def load_snapshots(sync_path: Path) -> dict[str, Any]:
+  snapshots: list[dict[str, Any]] = []
+  if not sync_path.is_dir() or sync_path.is_symlink():
+    return {"snapshots": snapshots}
+  try:
+    names = sorted(os.listdir(sync_path))
+  except OSError:
+    return {"snapshots": snapshots}
+  for name in names:
+    if len(snapshots) >= MAX_SNAPSHOT_FILES:
+      break
+    if not name.endswith(".json") or "/" in name or name in (".", ".."):
+      continue
+    if name.startswith("."):
+      continue
+    path = sync_path / name
+    if path.is_symlink():
+      continue
+    data = read_json_object(path, MAX_SNAPSHOT_BYTES)
+    if data is not None and isinstance(data.get("providers"), dict):
+      snapshots.append(data)
+  return {"snapshots": snapshots}
+
+
+def load_text_file(path: Path, max_bytes: int) -> str:
+  if path.name != "agent":
+    return ""
+  try:
+    text = open_regular(path, max_bytes).decode("utf-8", errors="replace").strip()
+  except OSError:
+    return ""
+  if "\x00" in text:
+    return ""
+  line = text.splitlines()[0].strip() if text else ""
+  return line if is_safe_agent_id(line) else ""
+
+
 def main() -> int:
   parser = argparse.ArgumentParser(description="Print the Grok usage record as JSON")
   parser.add_argument("--force", action="store_true", help="rescan sessions and re-probe billing, ignoring caches")
   parser.add_argument("--limits-only", action="store_true", help="reuse any recent session scan; only billing must be fresh")
   parser.add_argument("--cache-seconds", type=float, default=SCAN_REUSE_SECONDS)
   parser.add_argument("--write", action="store_true", help="also write ~/.local/state/omarchy/agents/usage/grok.json")
+  parser.add_argument("--load-json", metavar="PATH", help="bounded no-follow JSON object read for QML")
+  parser.add_argument("--load-text", metavar="PATH", help="bounded no-follow single-line text read for QML")
+  parser.add_argument("--list-usage", metavar="DIR", help="list safe usage-record ids in a directory")
+  parser.add_argument("--load-snapshots", metavar="DIR", help="bounded no-follow snapshot merge inputs")
   args = parser.parse_args()
+
+  if args.load_json:
+    data = load_json_file(Path(args.load_json), MAX_USAGE_RECORD_BYTES)
+    return emit_json({"ok": True, "record": data} if data is not None else {"ok": False})
+  if args.load_text:
+    text = load_text_file(Path(args.load_text), MAX_DEFAULT_AGENT_BYTES)
+    return emit_json({"ok": True, "text": text})
+  if args.list_usage:
+    return emit_json(list_usage_records(Path(args.list_usage)))
+  if args.load_snapshots:
+    return emit_json(load_snapshots(Path(args.load_snapshots)))
 
   scan_age = 0 if args.force else (LIMITS_ONLY_REUSE_SECONDS if args.limits_only else args.cache_seconds)
   stats = cached_scan(grok_home() / "sessions", scan_age)
   limits = collect_limits(force=args.force)
   record = build_record(stats, limits)
-  text = json.dumps(record, separators=(",", ":"), sort_keys=True)
   if args.write:
     write_json(usage_dir() / "grok.json", record, mode=0o600)
-  print(text)
-  return 0
+  return emit_json(record)
 
 
 if __name__ == "__main__":

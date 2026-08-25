@@ -7,7 +7,7 @@ Grok on the Omarchy agents panel. Opens on your default coding agent.
 **ID:** `calmasacow.grok-usage`  
 **Author:** James Barnette  
 **License:** MIT  
-**Version:** 0.2.0
+**Version:** 0.2.1
 
 Stock Omarchy already shows Claude, Codex, and Fireworks on the robot-head
 Agents widget. This plugin is that same panel, plus:
@@ -67,8 +67,11 @@ live there. This plugin runs `scripts/omarchy-agent-usage-grok` after each
 refresh and writes `grok.json`.
 
 The collector reads the login already in `~/.grok/auth.json` and asks the same
-CLI-proxy billing endpoints Grok Build uses for `/usage`. No tokens are stored
-in this repository.
+CLI-proxy billing endpoints Grok Build uses for `/usage`. Authenticated
+requests stay on `cli-chat-proxy.grok.com` and refuse cross-origin redirects
+so the Grok token is not forwarded. Usage files are opened as regular files
+with a size cap (`O_NOFOLLOW`); QML never FileView-reads them. No tokens are
+stored in this repository.
 
 | File | Role |
 |---|---|

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "calmasacow.grok-usage",
   "name": "Grok Usage",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "James Barnette",
   "license": "MIT",
   "description": "Grok on the Omarchy agents panel. Opens on your default coding agent.",
