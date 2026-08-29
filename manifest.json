@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "calmasacow.grok-usage",
   "name": "Grok Usage",
-  "version": "0.2.1",
+  "version": "0.3.1",
   "author": "James Barnette",
   "license": "MIT",
-  "description": "Grok on the Omarchy agents panel. Opens on your default coding agent.",
+  "description": "Grok on the Omarchy agents panel: SuperGrok weekly meter, today's tokens, and the real Grok mark.",
   "kinds": [
     "bar-widget"
   ],
@@ -28,7 +28,7 @@
   ],
   "barWidget": {
     "displayName": "Grok Usage",
-    "description": "Stock agents panel plus a Grok collector. Opens on whatever omarchy default agent is set to.",
+    "description": "Stock agents panel plus a Grok collector. Weekly SuperGrok meter (Build vs Chat), today's tokens, and the Grok mark in the panel.",
     "category": "Developer Tools",
     "aliases": [
       "grok",

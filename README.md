@@ -7,11 +7,19 @@ Grok on the Omarchy agents panel. Opens on your default coding agent.
 **ID:** `calmasacow.grok-usage`  
 **Author:** James Barnette  
 **License:** MIT  
-**Version:** 0.2.1
+**Version:** 0.3.1
 
 Stock Omarchy already shows Claude, Codex, and Fireworks on the robot-head
-Agents widget. This plugin is that same panel, plus:
+Agents widget. This plugin is that same panel (the bar icon stays the robot
+head), plus:
 
+- the **Grok mark** in the Grok tab (not the star that shipped in 0.2)
+- a **weekly SuperGrok meter** that matches grok.com: percent used, reset
+  timestamp, and Grok Build vs Chat segments
+- **today's token count**, remaining percent in the header, and shortcuts to
+  Add Credits / Console / Docs at the bottom of the Grok tab
+- **Details** always open (sessions, cache hit, top models) — the daily
+  token chart is gone; today's usage is a token stat instead
 - a **Grok** collector (SuperGrok weekly pool, plan name, local session stats)
 - the panel **opens on your default coding agent** (`omarchy default agent`)
   instead of the first id alphabetically

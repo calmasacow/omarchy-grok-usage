@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -7,8 +8,8 @@ import qs.Ui
 
 Panel {
   id: root
-  moduleName: "omarchy.agents"
-  ipcTarget: "omarchy.agents"
+  moduleName: "calmasacow.grok-usage"
+  ipcTarget: "calmasacow.grok-usage"
   manageIpc: false
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -38,15 +39,20 @@ Panel {
   // panel keeps telling the truth while it sits open.
   property double nowMs: Date.now()
 
-  readonly property var limits: limitWindows(provider)
+  readonly property bool grokSelected: !!provider && provider.providerId === "grok"
+  readonly property var grokPool: grokPoolWindow(provider)
+  readonly property var grokProducts: grokProductWindows(provider)
+  readonly property var limits: grokSelected ? leftoverLimitWindows(provider) : limitWindows(provider)
   readonly property var models: modelRows(provider)
-  readonly property var headline: bindingWindow(provider)
+  readonly property var headline: grokSelected && grokPool ? grokPool : bindingWindow(provider)
   readonly property var balance: provider ? (provider.balance || null) : null
   // A prepaid account runs low the way a subscription window fills up: the
   // last 10% of the funded credits lights the same alarm.
   readonly property bool balanceAlarming: !!balance && balance.funded > 0
     && balance.remaining / balance.funded <= 0.1
   readonly property bool alarming: (!!headline && headline.percent >= 0.9) || balanceAlarming
+  readonly property color grokBuildColor: "#4C8DFF"
+  readonly property color grokChatColor: "#2563EB"
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
   function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
@@ -64,6 +70,15 @@ Panel {
   function launchAgent() {
     if (root.bar) root.bar.run("omarchy-agent --pick")
     root.close()
+  }
+
+  function openLink(url) {
+    var href = String(url || "")
+    if (href === "") return
+    if (root.bar && typeof root.bar.run === "function")
+      root.bar.run("xdg-open " + Util.shellQuote(href))
+    else
+      Qt.openUrlExternally(href)
   }
 
   // ---------------------------------------------------------------- limits
@@ -132,6 +147,112 @@ Panel {
       if (!best || windows[i].percent > best.percent) best = windows[i]
     }
     return best
+  }
+
+  function isProductLimit(entry) {
+    if (!entry) return false
+    if (String(entry.kind || "") === "product") return true
+    var title = String(entry.title || entry.label || "").toLowerCase()
+    return title.indexOf("build") >= 0 || title === "chat" || title.indexOf("grok chat") >= 0
+      || title.indexOf("imagine") >= 0 || title.indexOf("voice") >= 0
+  }
+
+  function isPoolLimit(entry) {
+    if (!entry) return false
+    if (String(entry.kind || "") === "pool") return true
+    if (isProductLimit(entry)) return false
+    return windowIsLong(String(entry.title || entry.label || ""))
+  }
+
+  function grokPoolWindow(p) {
+    if (!p) return null
+    var list = p.limits || []
+    for (var i = 0; i < list.length; i++) {
+      if (isPoolLimit(list[i]))
+        return limitWindow(list[i].label, list[i].percent, list[i].resetsAt, list[i].title)
+    }
+    return null
+  }
+
+  function grokProductWindows(p) {
+    if (!p) return []
+    var list = p.limits || []
+    var out = []
+    for (var i = 0; i < list.length; i++) {
+      if (!isProductLimit(list[i])) continue
+      out.push({
+        title: String(list[i].title || list[i].label || "Product"),
+        percent: Number(list[i].percent),
+        resetAt: String(list[i].resetsAt || "")
+      })
+    }
+    return out
+  }
+
+  function leftoverLimitWindows(p) {
+    if (!p) return []
+    var out = []
+    var list = p.limits || []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i] || {}
+      if (isPoolLimit(entry) || isProductLimit(entry)) continue
+      var percent = Number(entry.percent)
+      if (percent >= 0) out.push(limitWindow(entry.label, percent, entry.resetsAt, entry.title))
+    }
+    return out
+  }
+
+  function grokSegmentColor(title, index) {
+    var text = String(title || "").toLowerCase()
+    if (text.indexOf("build") >= 0) return root.grokBuildColor
+    if (text.indexOf("chat") >= 0) return root.grokChatColor
+    if (index === 0) return root.grokBuildColor
+    return Qt.darker(root.grokBuildColor, 1.25 + index * 0.15)
+  }
+
+  function formatResetAt(iso) {
+    var parsed = new Date(String(iso || ""))
+    if (isNaN(parsed.getTime())) return ""
+    var months = ["January", "February", "March", "April", "May", "June",
+                  "July", "August", "September", "October", "November", "December"]
+    var hours = parsed.getHours()
+    var ampm = hours >= 12 ? "PM" : "AM"
+    var hour = hours % 12
+    if (hour === 0) hour = 12
+    var mins = String(parsed.getMinutes()).padStart(2, "0")
+    return "Resets " + months[parsed.getMonth()] + " " + parsed.getDate()
+      + ", " + parsed.getFullYear() + " at " + hour + ":" + mins + " " + ampm
+  }
+
+  function remainingPercent(window) {
+    if (!window || !(window.percent >= 0)) return -1
+    return root.clamp(1 - window.percent, 0, 1)
+  }
+
+  function remainingLabel(window) {
+    var left = remainingPercent(window)
+    if (left < 0) return ""
+    return Math.round(left * 100) + "%"
+  }
+
+  function cacheHitRate(p) {
+    var usageByModel = p ? (p.modelUsage || {}) : {}
+    var read = 0
+    var total = 0
+    for (var id in usageByModel) {
+      var bucket = usageByModel[id] || {}
+      var cacheRead = Number(bucket.cacheReadInputTokens || 0)
+      read += cacheRead
+      total += Number(bucket.inputTokens || 0) + Number(bucket.outputTokens || 0)
+        + cacheRead + Number(bucket.cacheCreationInputTokens || 0)
+    }
+    return total > 0 ? read / total : 0
+  }
+
+  function formatCacheHit(n) {
+    var rate = Number(n || 0)
+    if (!(rate >= 0)) rate = 0
+    return (rate * 100).toFixed(1) + "%"
   }
 
   function resetMsFor(w) {
@@ -360,7 +481,7 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(380))
     // Taller than the control panels on purpose: this one is a dashboard, and
     // the whole point is reading limits and history without scrolling.
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(640))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(900))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -378,7 +499,9 @@ Panel {
       onActivateRequested: root.refreshNow()
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
-      onTextKey: function(t) { if (t === "r" || t === "R") root.refreshNow() }
+      onTextKey: function(t) {
+        if (t === "r" || t === "R") root.refreshNow()
+      }
 
       Flickable {
         id: panelFlick
@@ -396,52 +519,103 @@ Panel {
           width: panelFlick.width
           spacing: Style.space(12)
 
-          // ---------- Hero: provider mark · name · plan ----------
-          PanelHero {
-            id: hero
+          // ---------- Hero: provider mark · name · plan · remaining ----------
+          Item {
+            id: header
             visible: !!root.provider
             width: parent.width
-            title: root.provider ? root.provider.providerName : ""
-            meta: root.heroMeta(root.provider)
-            foreground: root.foreground
-            fontFamily: root.fontFamily
+            implicitHeight: hero.implicitHeight
+            readonly property string amountText: root.remainingLabel(root.headline)
+            readonly property color amountColor: root.alarming ? root.urgent : root.foreground
+            readonly property color dimColor: root.dim
+            readonly property string family: root.fontFamily
 
-            iconComponent: Component {
-              Item {
-                id: heroMark
-                property var candidates: root.iconCandidatesForProvider(root.provider, root.surface)
-                // Provider objects are rebuilt on every refresh, which churns the
-                // array's identity without changing its content. Restart the fallback
-                // walk only when the URLs change: re-pointing source at a URL whose
-                // load already failed emits no statusChanged, so an identity-only
-                // reset would strand the walker on a missing -light twin.
-                property string candidatesKey: candidates.join("\n")
-                property int candidateIndex: 0
-                onCandidatesKeyChanged: candidateIndex = 0
+            PanelHero {
+              id: hero
+              width: parent.width
+              title: root.provider ? root.provider.providerName : ""
+              meta: root.heroMeta(root.provider)
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              trailingControl: Component {
+                Column {
+                  visible: header.amountText !== ""
+                  spacing: Style.space(2)
+                  width: Math.max(heroAmount.implicitWidth, heroRemaining.implicitWidth)
 
-                width: Style.font.display
-                height: Style.font.display
+                  Text {
+                    id: heroAmount
+                    width: parent.width
+                    text: header.amountText
+                    color: header.amountColor
+                    font.family: header.family
+                    font.pixelSize: Style.font.title
+                    font.bold: true
+                    horizontalAlignment: Text.AlignRight
+                  }
 
-                Image {
-                  id: heroMarkImage
-                  anchors.fill: parent
-                  source: heroMark.candidateIndex < heroMark.candidates.length ? heroMark.candidates[heroMark.candidateIndex] : ""
-                  sourceSize.width: Style.font.display * 2
-                  sourceSize.height: Style.font.display * 2
-                  fillMode: Image.PreserveAspectFit
-                  // Advancing source from inside its own status change trips the
-                  // binding-loop detector; defer the step one tick.
-                  onStatusChanged: if (status === Image.Error && heroMark.candidateIndex < heroMark.candidates.length)
-                    Qt.callLater(function() { heroMark.candidateIndex++ })
+                  Text {
+                    id: heroRemaining
+                    width: parent.width
+                    text: "REMAINING"
+                    color: header.dimColor
+                    font.family: header.family
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    font.letterSpacing: 1.2
+                    horizontalAlignment: Text.AlignRight
+                  }
                 }
+              }
 
-                Text {
-                  anchors.centerIn: parent
-                  visible: heroMarkImage.status !== Image.Ready
-                  text: button.text
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.display
+              iconComponent: Component {
+                Item {
+                  id: heroMark
+                  property var candidates: root.iconCandidatesForProvider(root.provider, root.surface)
+                  // Provider objects are rebuilt on every refresh, which churns the
+                  // array's identity without changing its content. Restart the fallback
+                  // walk only when the URLs change: re-pointing source at a URL whose
+                  // load already failed emits no statusChanged, so an identity-only
+                  // reset would strand the walker on a missing -light twin.
+                  property string candidatesKey: candidates.join("\n")
+                  property int candidateIndex: 0
+                  onCandidatesKeyChanged: candidateIndex = 0
+                  readonly property bool colorize: root.grokSelected
+
+                  width: Style.font.display
+                  height: Style.font.display
+
+                  Image {
+                    id: heroMarkImage
+                    anchors.fill: parent
+                    source: heroMark.candidateIndex < heroMark.candidates.length ? heroMark.candidates[heroMark.candidateIndex] : ""
+                    sourceSize.width: Style.font.display * 2
+                    sourceSize.height: Style.font.display * 2
+                    fillMode: Image.PreserveAspectFit
+                    visible: status === Image.Ready && !heroMark.colorize
+                    layer.enabled: heroMark.colorize
+                    // Advancing source from inside its own status change trips the
+                    // binding-loop detector; defer the step one tick.
+                    onStatusChanged: if (status === Image.Error && heroMark.candidateIndex < heroMark.candidates.length)
+                      Qt.callLater(function() { heroMark.candidateIndex++ })
+                  }
+
+                  MultiEffect {
+                    anchors.fill: heroMarkImage
+                    source: heroMarkImage
+                    visible: heroMark.colorize && heroMarkImage.status === Image.Ready
+                    colorization: 1.0
+                    colorizationColor: root.foreground
+                  }
+
+                  Text {
+                    anchors.centerIn: parent
+                    visible: heroMarkImage.status !== Image.Ready
+                    text: button.text
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.display
+                  }
                 }
               }
             }
@@ -519,7 +693,96 @@ Panel {
             }
           }
 
-          // ---------- Balance / limits ----------
+          // ---------- Weekly SuperGrok meter (grok.com layout) ----------
+          PanelSeparator {
+            visible: grokMeterSection.visible
+            foreground: root.foreground
+          }
+
+          Column {
+            id: grokMeterSection
+            visible: root.grokSelected && !!root.grokPool
+            width: parent.width
+            spacing: Style.space(10)
+
+            PanelSectionHeader {
+              width: parent.width
+              text: "WEEKLY SUPERGROK LIMIT"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Item {
+              width: parent.width
+              implicitHeight: Math.max(usedLabel.implicitHeight, resetLabel.implicitHeight)
+
+              Text {
+                id: usedLabel
+                text: root.grokPool ? Math.round(root.grokPool.percent * 100) + "% used" : ""
+                color: (root.grokPool && root.grokPool.percent >= 0.9) ? root.urgent : root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              Text {
+                id: resetLabel
+                text: root.grokPool ? root.formatResetAt(root.grokPool.resetAt) : ""
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+                horizontalAlignment: Text.AlignRight
+                anchors.right: parent.right
+                anchors.left: usedLabel.right
+                anchors.leftMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+              }
+            }
+
+            SegmentedMeter {
+              width: parent.width
+              pool: root.grokPool
+              segments: root.grokProducts
+            }
+
+            Flow {
+              id: grokLegend
+              width: parent.width
+              spacing: Style.space(12)
+              visible: root.grokProducts.length > 0
+
+              Repeater {
+                model: root.grokProducts
+
+                Row {
+                  required property var modelData
+                  required property int index
+                  spacing: Style.space(6)
+
+                  Rectangle {
+                    width: Style.space(8)
+                    height: Style.space(8)
+                    radius: width / 2
+                    color: root.grokSegmentColor(modelData.title, index)
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+
+                  Text {
+                    text: modelData.title + " " + Math.round(Number(modelData.percent || 0) * 100) + "%"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+                }
+              }
+            }
+          }
+
+          // ---------- Balance / leftover limits ----------
           PanelSeparator {
             visible: balanceSection.visible || limitsSection.visible
             foreground: root.foreground
@@ -609,74 +872,159 @@ Panel {
             }
           }
 
-          // ---------- Usage ----------
+          // ---------- Today ----------
           PanelSeparator {
-            visible: usageSection.visible
+            visible: todaySection.visible
             foreground: root.foreground
           }
 
           Column {
-            id: usageSection
-            visible: !!root.provider && root.provider.recentDays && root.provider.recentDays.length > 0
+            id: todaySection
+            visible: !!root.provider
             width: parent.width
-            spacing: Style.spacing.md
-
-            readonly property var days: root.provider ? (root.provider.recentDays || []) : []
-            readonly property real peak: Math.max(1, root.weekPeak(root.provider))
+            spacing: Style.space(10)
 
             PanelSectionHeader {
               width: parent.width
-              text: "TOKENS BY DAY"
+              text: "TODAY"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
 
-            Repeater {
-              model: usageSection.days
+            Grid {
+              id: todayGrid
+              width: parent.width
+              columns: 2
+              columnSpacing: Style.space(8)
+              rowSpacing: Style.space(8)
 
-              DayRow {
-                required property var modelData
-                required property int index
-
-                width: usageSection.width
-                day: modelData
-                ratio: Number(modelData.messageCount || 0) / usageSection.peak
-                // By date, not by position: the Claude stats-cache fallback can
-                // hand us a window that stops short of today.
-                today: String(modelData.date || "") === root.todayDate()
+              StatCard {
+                width: (todayGrid.width - todayGrid.columnSpacing) / 2
+                label: "Tokens"
+                value: root.provider ? usage.formatTokenCount(Number(root.provider.todayTotalTokens || 0)) : "—"
+              }
+              StatCard {
+                width: (todayGrid.width - todayGrid.columnSpacing) / 2
+                label: "Prompts"
+                value: root.provider && root.provider.hasPromptStats !== false
+                  ? String(Number(root.provider.todayPrompts || 0))
+                  : "—"
               }
             }
           }
 
-          // ---------- Models ----------
+          // ---------- Details (always open) ----------
           PanelSeparator {
-            visible: modelSection.visible
+            visible: detailsSection.visible
             foreground: root.foreground
           }
 
           Column {
-            id: modelSection
-            visible: root.models.length > 0
+            id: detailsSection
+            visible: !!root.provider
             width: parent.width
-            spacing: Style.spacing.md
+            spacing: Style.space(10)
 
             PanelSectionHeader {
               width: parent.width
-              text: "TOKENS BY MODEL"
+              text: "DETAILS"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
 
-            Repeater {
-              model: root.models
+            Grid {
+              id: detailsGrid
+              width: parent.width
+              columns: 2
+              columnSpacing: Style.space(8)
+              rowSpacing: Style.space(8)
 
-              ModelRow {
-                required property var modelData
-                width: modelSection.width
-                row: modelData
-                // Scaled to the heaviest model, so the top row is always full —
-                // the same scale-to-peak the weekly chart uses for its busiest day.
-                share: modelData.total / Math.max(1, root.models[0].total)
+              StatCard {
+                width: (detailsGrid.width - detailsGrid.columnSpacing) / 2
+                label: "Sessions"
+                value: root.provider ? String(Number(root.provider.todaySessions || 0)) : "—"
+              }
+              StatCard {
+                width: (detailsGrid.width - detailsGrid.columnSpacing) / 2
+                label: "Cache hit"
+                value: root.formatCacheHit(root.cacheHitRate(root.provider))
+              }
+              StatCard {
+                width: (detailsGrid.width - detailsGrid.columnSpacing) / 2
+                label: "All-time prompts"
+                value: root.provider && root.provider.hasPromptStats !== false
+                  ? String(Number(root.provider.totalPrompts || 0))
+                  : "—"
+              }
+              StatCard {
+                width: (detailsGrid.width - detailsGrid.columnSpacing) / 2
+                label: "Active days"
+                value: root.provider ? String(Number(root.provider.activeDays || 0)) : "—"
+              }
+            }
+
+            Column {
+              id: modelsList
+              visible: root.models.length > 0
+              width: parent.width
+              spacing: Style.spacing.md
+
+              PanelSectionHeader {
+                width: parent.width
+                text: "TOP MODELS"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+
+              Repeater {
+                model: root.models
+
+                ModelRow {
+                  required property var modelData
+                  width: modelsList.width
+                  row: modelData
+                  share: modelData.total / Math.max(1, root.models[0].total)
+                }
+              }
+            }
+          }
+
+          // ---------- Account links (Grok tab) ----------
+          PanelSeparator {
+            visible: grokLinksSection.visible
+            foreground: root.foreground
+          }
+
+          Column {
+            id: grokLinksSection
+            visible: root.grokSelected
+            width: parent.width
+            spacing: Style.space(10)
+
+            Row {
+              id: linksRow
+              width: parent.width
+              spacing: Style.space(6)
+
+              readonly property real cellWidth: (width - spacing * 2) / 3
+
+              LinkTile {
+                width: linksRow.cellWidth
+                icon: "󰐕"
+                label: "Add Credits"
+                url: "https://grok.com"
+              }
+              LinkTile {
+                width: linksRow.cellWidth
+                icon: "󰆍"
+                label: "API Console"
+                url: "https://console.x.ai"
+              }
+              LinkTile {
+                width: linksRow.cellWidth
+                icon: "󰈙"
+                label: "Docs"
+                url: "https://docs.x.ai"
               }
             }
           }
@@ -693,6 +1041,142 @@ Panel {
             elide: Text.ElideRight
           }
         }
+      }
+    }
+  }
+
+  component LinkTile: Item {
+    id: linkTile
+    property string icon: ""
+    property string label: ""
+    property string url: ""
+
+    implicitHeight: linkIcon.implicitHeight + linkCaption.implicitHeight + Style.space(10)
+
+    MouseArea {
+      id: linkMa
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: root.openLink(linkTile.url)
+    }
+
+    Column {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(4)
+
+      Text {
+        id: linkIcon
+        anchors.horizontalCenter: parent.horizontalCenter
+        text: linkTile.icon
+        color: linkMa.containsMouse ? root.foreground : root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.display
+      }
+
+      Text {
+        id: linkCaption
+        width: parent.width
+        text: linkTile.label
+        color: linkMa.containsMouse ? root.foreground : root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.WordWrap
+      }
+    }
+  }
+
+  // grok.com weekly meter: unused track, then product segments as adjacent
+  // pills (Build bright blue, Chat darker). Falls back to a single fill when
+  // the collector has not split the pool yet.
+  component SegmentedMeter: Item {
+    id: grokMeter
+    property var pool: null
+    property var segments: []
+    property real thickness: Math.max(Style.space(8), Math.round(Style.spacing.controlHeight * 0.22))
+    property real gap: Style.space(3)
+
+    implicitHeight: thickness
+    readonly property real used: pool ? root.clamp(Number(pool.percent || 0), 0, 1) : 0
+    readonly property bool alarming: used >= 0.9
+
+    Rectangle {
+      id: grokTrack
+      anchors.fill: parent
+      radius: height / 2
+      color: root.track
+    }
+
+    Repeater {
+      model: grokMeter.segments.length > 0 ? grokMeter.segments : [{ title: "Weekly", percent: grokMeter.used }]
+
+      Rectangle {
+        required property var modelData
+        required property int index
+
+        readonly property real start: {
+          var x = 0
+          for (var i = 0; i < index; i++)
+            x += root.clamp(Number(grokMeter.segments.length > 0 ? grokMeter.segments[i].percent : 0), 0, 1)
+          return x
+        }
+
+        height: grokTrack.height
+        radius: height / 2
+        y: grokTrack.y
+        x: grokTrack.x + start * grokTrack.width + (index > 0 ? grokMeter.gap : 0)
+        width: Math.max(0, root.clamp(Number(modelData.percent || 0), 0, 1) * grokTrack.width - (index > 0 ? grokMeter.gap : 0))
+        color: grokMeter.alarming ? root.urgent : root.grokSegmentColor(modelData.title, index)
+
+        Behavior on width {
+          NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+        }
+        Behavior on x {
+          NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+        }
+      }
+    }
+  }
+
+  component StatCard: Rectangle {
+    id: statCard
+    property string label: ""
+    property string value: ""
+
+    implicitHeight: statLabel.implicitHeight + statValue.implicitHeight + Style.space(16)
+    radius: Style.cornerRadius
+    color: root.alpha(root.foreground, 0.05)
+
+    Column {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.space(2)
+
+      Text {
+        id: statLabel
+        width: parent.width
+        text: statCard.label
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+      }
+
+      Text {
+        id: statValue
+        width: parent.width
+        text: statCard.value
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+        font.bold: true
+        elide: Text.ElideRight
       }
     }
   }

@@ -671,6 +671,64 @@ def period_label(period_type: str) -> str:
   return "Usage"
 
 
+# grok.com's weekly meter splits the same pool into products (Grok Build, Chat,
+# Imagine, Voice). The API sends PascalCase ids; the site title-cases them and
+# drops the "Grok" prefix on Chat.
+PRODUCT_TITLES = {
+  "GrokBuild": "Grok Build",
+  "GrokChat": "Chat",
+  "Chat": "Chat",
+  "GrokImagine": "Imagine",
+  "Imagine": "Imagine",
+  "GrokVoice": "Voice",
+  "Voice": "Voice",
+}
+
+
+def product_title(product: str) -> str:
+  raw = str(product or "").strip()
+  if raw in PRODUCT_TITLES:
+    return PRODUCT_TITLES[raw]
+  spaced = "".join((" " + ch if ch.isupper() and i else ch) for i, ch in enumerate(raw)).strip()
+  if spaced.lower().startswith("grok chat"):
+    return "Chat"
+  return spaced or raw or "Product"
+
+
+def parse_percent_points(raw: Any) -> float | None:
+  if raw is None:
+    return None
+  try:
+    return min(1.0, max(0.0, float(raw) / 100.0))
+  except (TypeError, ValueError):
+    return None
+
+
+def parse_product_usage(config: dict[str, Any], resets_at: str, starts_at: str) -> list[dict[str, Any]]:
+  rows = config.get("productUsage")
+  if not isinstance(rows, list):
+    return []
+  out: list[dict[str, Any]] = []
+  for entry in rows:
+    if not isinstance(entry, dict):
+      continue
+    product = str(entry.get("product") or "").strip()
+    if product == "":
+      continue
+    percent = parse_percent_points(entry.get("usagePercent"))
+    if percent is None:
+      continue
+    out.append({
+      "kind": "product",
+      "label": product,
+      "title": product_title(product),
+      "percent": percent,
+      "resetsAt": resets_at,
+      "startsAt": starts_at,
+    })
+  return out
+
+
 def limit_window_open(entry: dict[str, Any], now: dt.datetime) -> bool:
   resets = parse_iso(entry.get("resetsAt"))
   if resets is None:
@@ -716,17 +774,21 @@ def parse_limits(config: dict[str, Any]) -> list[dict[str, Any]]:
 
   if percent is not None:
     limits.append({
-      "label": f"{label} limit",
+      "kind": "pool",
+      "label": f"{label} SuperGrok Limit" if label == "Weekly" else f"{label} limit",
       "title": label,
       "percent": percent,
       "resetsAt": resets_at,
       "startsAt": starts_at,
     })
 
+  limits.extend(parse_product_usage(config, resets_at, starts_at))
+
   on_cap = cent_value(config.get("onDemandCap"))
   on_used = cent_value(config.get("onDemandUsed"))
   if on_cap and on_cap > 0 and on_used is not None and on_used > 0:
     limits.append({
+      "kind": "ondemand",
       "label": "On-demand",
       "title": "On-demand",
       "percent": min(1.0, on_used / on_cap),

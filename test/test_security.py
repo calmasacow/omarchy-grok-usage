@@ -180,6 +180,34 @@ class FileTrustTests(unittest.TestCase):
     self.assertFalse(mod.is_safe_agent_id("a" * 65))
 
 
+class ParseLimitsTests(unittest.TestCase):
+  def test_weekly_pool_and_product_segments(self):
+    limits = mod.parse_limits({
+      "currentPeriod": {
+        "type": "USAGE_PERIOD_TYPE_WEEKLY",
+        "start": "2026-08-24T23:52:40+00:00",
+        "end": "2026-08-31T23:52:40+00:00",
+      },
+      "creditUsagePercent": 73.0,
+      "productUsage": [
+        {"product": "GrokBuild", "usagePercent": 68.0},
+        {"product": "GrokChat", "usagePercent": 5.0},
+      ],
+    })
+    self.assertEqual([row["kind"] for row in limits], ["pool", "product", "product"])
+    self.assertEqual(limits[0]["title"], "Weekly")
+    self.assertAlmostEqual(limits[0]["percent"], 0.73)
+    self.assertEqual(limits[1]["title"], "Grok Build")
+    self.assertAlmostEqual(limits[1]["percent"], 0.68)
+    self.assertEqual(limits[2]["title"], "Chat")
+    self.assertAlmostEqual(limits[2]["percent"], 0.05)
+
+  def test_product_title_drops_grok_on_chat(self):
+    self.assertEqual(mod.product_title("GrokBuild"), "Grok Build")
+    self.assertEqual(mod.product_title("GrokChat"), "Chat")
+    self.assertEqual(mod.product_title("GrokImagine"), "Imagine")
+
+
 class ScanSkipTests(unittest.TestCase):
   def test_scan_skips_symlink_updates(self):
     with tempfile.TemporaryDirectory() as raw:
