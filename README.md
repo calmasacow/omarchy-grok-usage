@@ -7,7 +7,7 @@ Grok on the Omarchy agents panel. Opens on your default coding agent.
 **ID:** `calmasacow.grok-usage`  
 **Author:** James Barnette  
 **License:** MIT  
-**Version:** 0.3.1
+**Version:** 0.3.2
 
 Stock Omarchy already shows Claude, Codex, and Fireworks on the robot-head
 Agents widget. This plugin is that same panel (the bar icon stays the robot

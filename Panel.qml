@@ -544,6 +544,7 @@ Panel {
                   width: Math.max(heroAmount.implicitWidth, heroRemaining.implicitWidth)
 
                   Text {
+                    textFormat: Text.PlainText
                     id: heroAmount
                     width: parent.width
                     text: header.amountText
@@ -555,6 +556,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     id: heroRemaining
                     width: parent.width
                     text: "REMAINING"
@@ -609,6 +611,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     anchors.centerIn: parent
                     visible: heroMarkImage.status !== Image.Ready
                     text: button.text
@@ -622,6 +625,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.providers.length === 0
             width: parent.width
             topPadding: Style.space(24)
@@ -679,6 +683,7 @@ Panel {
             radius: Style.cornerRadius
 
             Text {
+              textFormat: Text.PlainText
               id: statusText
               anchors.left: parent.left
               anchors.right: parent.right
@@ -717,6 +722,7 @@ Panel {
               implicitHeight: Math.max(usedLabel.implicitHeight, resetLabel.implicitHeight)
 
               Text {
+                textFormat: Text.PlainText
                 id: usedLabel
                 text: root.grokPool ? Math.round(root.grokPool.percent * 100) + "% used" : ""
                 color: (root.grokPool && root.grokPool.percent >= 0.9) ? root.urgent : root.foreground
@@ -728,6 +734,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 id: resetLabel
                 text: root.grokPool ? root.formatResetAt(root.grokPool.resetAt) : ""
                 color: root.dim
@@ -771,6 +778,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     text: modelData.title + " " + Math.round(Number(modelData.percent || 0) * 100) + "%"
                     color: root.dim
                     font.family: root.fontFamily
@@ -812,6 +820,7 @@ Panel {
               implicitHeight: Math.max(balanceLabel.implicitHeight, balanceValue.implicitHeight)
 
               Text {
+                textFormat: Text.PlainText
                 id: balanceLabel
                 text: "Prepaid credits"
                 color: root.foreground
@@ -822,6 +831,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 id: balanceValue
                 text: root.balance ? root.formatMoney(root.balance.remaining, root.balance.currency) : ""
                 color: root.balanceAlarming ? root.urgent : root.foreground
@@ -840,6 +850,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: text !== ""
               width: parent.width
               text: root.balanceDetailText(root.balance)
@@ -1030,6 +1041,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: text !== ""
             width: parent.width
             topPadding: Style.space(2)
@@ -1068,6 +1080,7 @@ Panel {
       spacing: Style.space(4)
 
       Text {
+        textFormat: Text.PlainText
         id: linkIcon
         anchors.horizontalCenter: parent.horizontalCenter
         text: linkTile.icon
@@ -1077,6 +1090,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         id: linkCaption
         width: parent.width
         text: linkTile.label
@@ -1159,6 +1173,7 @@ Panel {
       spacing: Style.space(2)
 
       Text {
+        textFormat: Text.PlainText
         id: statLabel
         width: parent.width
         text: statCard.label
@@ -1169,6 +1184,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         id: statValue
         width: parent.width
         text: statCard.value
@@ -1195,6 +1211,7 @@ Panel {
       implicitHeight: Math.max(limitLabel.implicitHeight, limitValue.implicitHeight)
 
       Text {
+        textFormat: Text.PlainText
         id: limitLabel
         // A model-scoped window is titled after its model, and those names run
         // long enough to reach the percentage, so the title gives way first.
@@ -1210,6 +1227,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         id: limitValue
         text: limitRow.window && limitRow.window.percent >= 0
           ? Math.round(limitRow.window.percent * 100) + "%"
@@ -1229,6 +1247,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: resetText
       width: parent.width
       text: {
@@ -1283,6 +1302,7 @@ Panel {
     implicitHeight: Math.max(dayLabel.implicitHeight, dayValue.implicitHeight) + Style.spacing.sm
 
     Text {
+      textFormat: Text.PlainText
       id: dayLabel
       text: root.dayLabel(dayRow.day ? dayRow.day.date : "", dayRow.today)
       color: dayRow.today ? root.foreground : root.dim
@@ -1320,6 +1340,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: dayValue
       text: usage.formatTokenCount(dayRow.day ? Number(dayRow.day.messageCount || 0) : 0)
       color: dayRow.today ? root.foreground : root.dim
@@ -1375,6 +1396,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: modelName
       text: modelRow.row ? modelRow.row.name : ""
       color: root.foreground
@@ -1389,6 +1411,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       id: modelTokens
       text: modelRow.row ? usage.formatTokenCount(modelRow.row.total) : ""
       color: root.dim

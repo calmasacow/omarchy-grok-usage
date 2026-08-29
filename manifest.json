@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "calmasacow.grok-usage",
   "name": "Grok Usage",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "author": "James Barnette",
   "license": "MIT",
   "description": "Grok on the Omarchy agents panel: SuperGrok weekly meter, today's tokens, and the real Grok mark.",
