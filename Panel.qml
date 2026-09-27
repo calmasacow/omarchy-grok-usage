@@ -40,12 +40,9 @@ Panel {
   property double nowMs: Date.now()
 
   readonly property bool grokSelected: !!provider && provider.providerId === "grok"
-  readonly property bool codexSelected: providerIsCodex(provider)
   readonly property var grokPool: grokPoolWindow(provider)
   readonly property var grokProducts: grokProductWindows(provider)
-  readonly property var limits: grokSelected ? leftoverLimitWindows(provider)
-    : codexSelected ? remainingLimitWindows(provider)
-    : limitWindows(provider)
+  readonly property var limits: remainingLimitWindows(provider)
   readonly property var models: modelRows(provider)
   readonly property var headline: grokSelected && grokPool ? grokPool : bindingWindow(provider)
   readonly property var balance: provider ? (provider.balance || null) : null
@@ -59,13 +56,6 @@ Panel {
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
   function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
-
-  function providerIsCodex(p) {
-    if (!p) return false
-    var id = String(p.providerId || "").toLowerCase()
-    var name = String(p.providerName || "").toLowerCase()
-    return id === "codex" || name === "codex"
-  }
 
   function selectProvider(index) {
     if (providers.length === 0) return
@@ -148,15 +138,18 @@ Panel {
     return out
   }
 
-  // Codex and the website present quota as capacity remaining. The collector
-  // receives usedPercent, so invert it only for Codex's session-limit rows;
-  // the upper-right headline already uses the remaining value.
+  // The website presents standard quota rows as capacity remaining. The
+  // collector receives usedPercent, so invert it for the panel rows; the
+  // upper-right headline already uses the remaining value.
   function remainingLimitWindows(p) {
     if (!p) return []
     var list = p.limits || []
+    var isGrok = String(p.providerId || "").toLowerCase() === "grok"
     var out = []
     for (var i = 0; i < list.length; i++) {
       var entry = list[i] || {}
+      // Grok's pool and product limits have their own segmented meter above.
+      if (isGrok && (isPoolLimit(entry) || isProductLimit(entry))) continue
       var used = Number(entry.percent)
       if (!(used >= 0)) continue
       var title = String(entry.title || entry.label || "Limit")
@@ -171,7 +164,6 @@ Panel {
         title: title,
         percent: root.clamp(1 - used, 0, 1),
         resetsAt: String(entry.resetsAt || entry.resetAt || ""),
-        remaining: true
       })
     }
     return out
@@ -224,19 +216,6 @@ Panel {
         percent: Number(list[i].percent),
         resetAt: String(list[i].resetsAt || "")
       })
-    }
-    return out
-  }
-
-  function leftoverLimitWindows(p) {
-    if (!p) return []
-    var out = []
-    var list = p.limits || []
-    for (var i = 0; i < list.length; i++) {
-      var entry = list[i] || {}
-      if (isPoolLimit(entry) || isProductLimit(entry)) continue
-      var percent = Number(entry.percent)
-      if (percent >= 0) out.push(limitWindow(entry.label, percent, entry.resetsAt, entry.title))
     }
     return out
   }
@@ -1236,14 +1215,12 @@ Panel {
     }
   }
 
-  // A limit window: label and percentage, meter, and reset countdown.
+  // A remaining-capacity limit window: label, percentage, meter, and reset countdown.
   component LimitRow: Column {
     id: limitRow
     property var window: null
 
-    readonly property bool alarming: window && (window.remaining === true
-      ? window.percent <= 0.1
-      : window.percent >= 0.9)
+    readonly property bool alarming: window && window.percent <= 0.1
 
     spacing: Style.space(6)
 
@@ -1271,7 +1248,7 @@ Panel {
         textFormat: Text.PlainText
         id: limitValue
         text: limitRow.window && limitRow.window.percent >= 0
-          ? Math.round(limitRow.window.percent * 100) + (limitRow.window.remaining === true ? "% left" : "%")
+          ? Math.round(limitRow.window.percent * 100) + "% left"
           : "—"
         color: limitRow.alarming ? root.urgent : root.foreground
         font.family: root.fontFamily
