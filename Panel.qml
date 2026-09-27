@@ -40,9 +40,12 @@ Panel {
   property double nowMs: Date.now()
 
   readonly property bool grokSelected: !!provider && provider.providerId === "grok"
+  readonly property bool codexSelected: !!provider && provider.providerId === "codex"
   readonly property var grokPool: grokPoolWindow(provider)
   readonly property var grokProducts: grokProductWindows(provider)
-  readonly property var limits: grokSelected ? leftoverLimitWindows(provider) : limitWindows(provider)
+  readonly property var limits: grokSelected ? leftoverLimitWindows(provider)
+    : codexSelected ? remainingLimitWindows(provider)
+    : limitWindows(provider)
   readonly property var models: modelRows(provider)
   readonly property var headline: grokSelected && grokPool ? grokPool : bindingWindow(provider)
   readonly property var balance: provider ? (provider.balance || null) : null
@@ -134,6 +137,35 @@ Panel {
       var entry = list[i] || {}
       var percent = Number(entry.percent)
       if (percent >= 0) out.push(limitWindow(entry.label, percent, entry.resetsAt, entry.title))
+    }
+    return out
+  }
+
+  // Codex and the website present quota as capacity remaining. The collector
+  // receives usedPercent, so invert it only for Codex's session-limit rows;
+  // the upper-right headline already uses the remaining value.
+  function remainingLimitWindows(p) {
+    if (!p) return []
+    var list = p.limits || []
+    var out = []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i] || {}
+      var used = Number(entry.percent)
+      if (!(used >= 0)) continue
+      var title = String(entry.title || entry.label || "Limit")
+      var lower = String(entry.label || title).toLowerCase()
+      if (lower.indexOf("week") >= 0 || lower.indexOf("7-day") >= 0)
+        title = "Weekly limit"
+      else if (lower.indexOf("5h") >= 0 || lower.indexOf("5-hour") >= 0)
+        title = "5-hour limit"
+      else if (title.toLowerCase().indexOf("limit") < 0)
+        title += " limit"
+      out.push({
+        title: title,
+        percent: root.clamp(1 - used, 0, 1),
+        resetsAt: String(entry.resetAt || ""),
+        remaining: true
+      })
     }
     return out
   }
@@ -1202,7 +1234,9 @@ Panel {
     id: limitRow
     property var window: null
 
-    readonly property bool alarming: window && window.percent >= 0.9
+    readonly property bool alarming: window && (window.remaining === true
+      ? window.percent <= 0.1
+      : window.percent >= 0.9)
 
     spacing: Style.space(6)
 
@@ -1230,7 +1264,7 @@ Panel {
         textFormat: Text.PlainText
         id: limitValue
         text: limitRow.window && limitRow.window.percent >= 0
-          ? Math.round(limitRow.window.percent * 100) + "%"
+          ? Math.round(limitRow.window.percent * 100) + (limitRow.window.remaining === true ? "% left" : "%")
           : "—"
         color: limitRow.alarming ? root.urgent : root.foreground
         font.family: root.fontFamily

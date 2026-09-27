@@ -277,7 +277,10 @@ Item {
     var grokPart = providerEnabled("grok") && root.grokCollector !== ""
       ? 'if [ -f "$0" ]; then PYTHONDONTWRITEBYTECODE=1 python3 -B "$0" --write' + grokFlags + '; fi; '
       : ""
-    var script = 'omarchy-agent-usage-update "$@"; status=$?; ' + grokPart + 'exit $status'
+    var repairPart = root.grokCollector !== ""
+      ? 'if [ -f "$0" ]; then PYTHONDONTWRITEBYTECODE=1 python3 -B "$0" --repair-codex; fi; '
+      : ""
+    var script = 'omarchy-agent-usage-update "$@"; status=$?; ' + repairPart + grokPart + 'exit $status'
     return ["bash", "-c", script, root.grokCollector].concat(args)
   }
 
@@ -377,13 +380,25 @@ Item {
     var stats = syncedStatsFor(String(record.id))
     var synced = !!stats
     var deviceCount = synced ? Number(stats.deviceCount || aggregateData.deviceCount || 0) : 0
+    var recordStatus = String(record.usageStatusText || "")
+    var recordHelp = String(record.authHelpText || "")
+    // Codex 0.156 may report a valid account from account/read while its
+    // optional rate-limit RPC is unavailable. That transport detail is not a
+    // provider failure and must not render as the red status card.
+    if (String(record.id) === "codex" && record.ready === true
+        && record.hasLocalStats === true
+        && recordStatus === "Codex limits unavailable"
+        && recordHelp.indexOf("account/read") === 0) {
+      recordStatus = ""
+      recordHelp = ""
+    }
 
     return {
       providerId: String(record.id),
       providerName: String(record.name || record.id),
       ready: record.ready === true || synced,
-      usageStatusText: String(record.usageStatusText || ""),
-      authHelpText: String(record.authHelpText || ""),
+      usageStatusText: recordStatus,
+      authHelpText: recordHelp,
 
       // Rate limits and balances stay per-account and are never merged
       // across devices.

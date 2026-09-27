@@ -1067,6 +1067,29 @@ def load_text_file(path: Path, max_bytes: int) -> str:
   return line if is_safe_agent_id(line) else ""
 
 
+def repair_codex_record() -> int:
+  """Keep valid local Codex usage from rendering as a provider error.
+
+  Codex 0.156 can answer account/read while leaving the optional
+  account/rateLimits/read request unanswered. The stock collector writes that
+  transport detail into usageStatusText, which the agents panel renders as an
+  error card. Local usage and account information are still valid in this
+  case, so clear only that known false-positive state.
+  """
+  path = usage_dir() / "codex.json"
+  record = read_json_object(path, MAX_USAGE_RECORD_BYTES)
+  if not isinstance(record, dict):
+    return 0
+  if (record.get("ready") is True
+      and record.get("hasLocalStats") is True
+      and record.get("usageStatusText") == "Codex limits unavailable"
+      and str(record.get("authHelpText") or "").startswith("account/read")):
+    record["usageStatusText"] = ""
+    record["authHelpText"] = ""
+    write_json(path, record, mode=0o600)
+  return 0
+
+
 def main() -> int:
   parser = argparse.ArgumentParser(description="Print the Grok usage record as JSON")
   parser.add_argument("--force", action="store_true", help="rescan sessions and re-probe billing, ignoring caches")
@@ -1077,6 +1100,7 @@ def main() -> int:
   parser.add_argument("--load-text", metavar="PATH", help="bounded no-follow single-line text read for QML")
   parser.add_argument("--list-usage", metavar="DIR", help="list safe usage-record ids in a directory")
   parser.add_argument("--load-snapshots", metavar="DIR", help="bounded no-follow snapshot merge inputs")
+  parser.add_argument("--repair-codex", action="store_true", help="clear a known false-positive Codex limits error")
   args = parser.parse_args()
 
   if args.load_json:
@@ -1089,6 +1113,8 @@ def main() -> int:
     return emit_json(list_usage_records(Path(args.list_usage)))
   if args.load_snapshots:
     return emit_json(load_snapshots(Path(args.load_snapshots)))
+  if args.repair_codex:
+    return repair_codex_record()
 
   scan_age = 0 if args.force else (LIMITS_ONLY_REUSE_SECONDS if args.limits_only else args.cache_seconds)
   stats = cached_scan(grok_home() / "sessions", scan_age)
