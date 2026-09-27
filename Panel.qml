@@ -40,7 +40,7 @@ Panel {
   property double nowMs: Date.now()
 
   readonly property bool grokSelected: !!provider && provider.providerId === "grok"
-  readonly property bool codexSelected: !!provider && provider.providerId === "codex"
+  readonly property bool codexSelected: providerIsCodex(provider)
   readonly property var grokPool: grokPoolWindow(provider)
   readonly property var grokProducts: grokProductWindows(provider)
   readonly property var limits: grokSelected ? leftoverLimitWindows(provider)
@@ -59,6 +59,13 @@ Panel {
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
   function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
+
+  function providerIsCodex(p) {
+    if (!p) return false
+    var id = String(p.providerId || "").toLowerCase()
+    var name = String(p.providerName || "").toLowerCase()
+    return id === "codex" || name === "codex"
+  }
 
   function selectProvider(index) {
     if (providers.length === 0) return
@@ -163,7 +170,7 @@ Panel {
       out.push({
         title: title,
         percent: root.clamp(1 - used, 0, 1),
-        resetsAt: String(entry.resetAt || ""),
+        resetsAt: String(entry.resetsAt || entry.resetAt || ""),
         remaining: true
       })
     }
