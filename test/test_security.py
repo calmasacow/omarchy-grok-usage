@@ -375,6 +375,45 @@ class CodexLimitsTests(unittest.TestCase):
       fetch.assert_not_called()
 
 
+  def test_collection_does_not_publish_intermediate_error(self):
+    path = self.root / "codex.json"
+    original = json.dumps({"id": "codex", "limits": [{"percent": 0.1}], "usageStatusText": ""})
+    path.write_text(original)
+    reported = {"id": "codex", "limits": [], "usageStatusText": "Codex limits unavailable", "todayPrompts": 42}
+    def recover():
+      self.assertEqual(path.read_text(), original)
+      return {"limits": [{"label": "5h window", "percent": 0.2}], "tierLabel": "plus"}
+    with patch.object(mod, "usage_dir", return_value=self.root), patch.object(mod.shutil, "which", return_value="collector"), patch.object(mod.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps(reported).encode())), patch.object(mod, "fetch_codex_limit_windows", side_effect=recover):
+      self.assertEqual(mod.collect_codex_record("limits"), 0)
+    record = json.loads(path.read_text())
+    self.assertEqual(record["usageStatusText"], "")
+    self.assertEqual(record["limits"][0]["percent"], 0.2)
+    self.assertEqual(record["todayPrompts"], 42)
+
+  def test_empty_or_invalid_collection_preserves_previous_report(self):
+    path = self.root / "codex.json"
+    path.write_text("previous successful report")
+    for output in [b"", b"not json", b"[]", b'{"id":"claude"}', b"x" * (mod.MAX_USAGE_RECORD_BYTES + 1)]:
+      with self.subTest(output=output[:20]), patch.object(mod, "usage_dir", return_value=self.root), patch.object(mod.shutil, "which", return_value="collector"), patch.object(mod.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, output)):
+        self.assertEqual(mod.collect_codex_record("limits"), 1)
+        self.assertEqual(path.read_text(), "previous successful report")
+
+  def test_failed_collection_recovery_preserves_previous_report(self):
+    path = self.root / "codex.json"
+    path.write_text("previous successful report")
+    reported = {"id": "codex", "limits": [], "usageStatusText": "Codex limits unavailable"}
+    with patch.object(mod, "usage_dir", return_value=self.root), patch.object(mod.shutil, "which", return_value="collector"), patch.object(mod.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps(reported).encode())), patch.object(mod, "fetch_codex_limit_windows", side_effect=OSError("offline")):
+      self.assertEqual(mod.collect_codex_record("limits"), 1)
+    self.assertEqual(path.read_text(), "previous successful report")
+
+  def test_explicit_unavailable_collection_is_published(self):
+    reported = {"id": "codex", "limits": [], "usageStatusText": "Codex unavailable"}
+    with patch.object(mod, "usage_dir", return_value=self.root), patch.object(mod.shutil, "which", return_value="collector"), patch.object(mod.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps(reported).encode())), patch.object(mod, "fetch_codex_limit_windows") as fetch:
+      self.assertEqual(mod.collect_codex_record("limits"), 0)
+      fetch.assert_not_called()
+    self.assertEqual(json.loads((self.root / "codex.json").read_text())["usageStatusText"], "Codex unavailable")
+
+
 class ParseLimitsTests(unittest.TestCase):
   def test_weekly_pool_and_product_segments(self):
     limits = mod.parse_limits({

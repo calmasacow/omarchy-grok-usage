@@ -255,7 +255,8 @@ Item {
   }
 
   function updateArgs(kind, agentIds) {
-    var args = []
+    // The helper publishes Codex only after its RPC recovery has finished.
+    var args = ["--except", "codex"]
     if (kind === "force") args.push("--force")
     if (kind === "limits") args.push("--limits-only")
     var providers = settings && settings.providers ? settings.providers : {}
@@ -278,10 +279,13 @@ Item {
     var grokPart = providerEnabled("grok") && root.grokCollector !== ""
       ? 'if [ -f "$0" ]; then PYTHONDONTWRITEBYTECODE=1 python3 -B "$0" --write' + grokFlags + '; fi; '
       : ""
-    var repairPart = root.grokCollector !== ""
-      ? 'if [ -f "$0" ]; then PYTHONDONTWRITEBYTECODE=1 python3 -B "$0" --repair-codex; fi; '
+    var codexWanted = providerEnabled("codex") && (!agentIds || agentIds.indexOf("codex") >= 0)
+    var codexKind = kind === "force" ? "force" : (kind === "limits" ? "limits" : "normal")
+    var codexPart = codexWanted && root.grokCollector !== ""
+      ? 'if [ -f "$0" ]; then PYTHONDONTWRITEBYTECODE=1 python3 -B "$0" --collect-codex ' + codexKind + '; codex_status=$?; if [ "$codex_status" -ne 0 ]; then status=$codex_status; fi; fi; '
       : ""
-    var script = 'omarchy-agent-usage-update "$@"; status=$?; ' + repairPart + grokPart + 'exit $status'
+    var script = 'omarchy-agent-usage-update "$@"; status=$?; ' + codexPart + grokPart + 'exit $status'
+
     return ["bash", "-c", script, root.grokCollector].concat(args)
   }
 

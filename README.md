@@ -7,7 +7,7 @@ Grok on the Omarchy agents panel. Opens on your default coding agent.
 **ID:** `calmasacow.grok-usage`  
 **Author:** James Barnette  
 **License:** MIT  
-**Version:** 0.3.8
+**Version:** 0.3.9
 
 Stock Omarchy already shows Claude, Codex, and Fireworks on the robot-head
 Agents widget. This plugin is that same panel (the bar icon stays the robot
@@ -97,7 +97,10 @@ Codex five-hour and weekly limits are recovered through a bounded app-server
 RPC read if the stock collector loses its response. Recovery uses fresh account
 limits. The panel keeps the last successful Codex meters during refresh and
 ignores empty reads or temporary limits-probe failures until valid data arrives.
-Explicit unavailable/authentication errors remain visible.
+Codex collection and recovery finish before a single atomic report write, so
+intermediate errors never replace the shared usage file. Empty or failed
+refreshes leave the previous report in place. Explicit unavailable/authentication
+errors remain visible.
 
 ## Requirements
 

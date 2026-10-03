@@ -1168,7 +1168,7 @@ def fetch_codex_limit_windows() -> dict[str, Any]:
   try:
     buffer = bytearray()
     codex_rpc_request(proc, 1, "initialize", {
-      "clientInfo": {"name": "omarchy-grok-usage", "version": "0.3.8"}
+      "clientInfo": {"name": "omarchy-grok-usage", "version": "0.3.9"}
     }, buffer)
     proc.stdin.write(b'{"method":"initialized","params":{}}\n')
     proc.stdin.flush()
@@ -1223,6 +1223,39 @@ def repair_codex_record() -> int:
   return 0
 
 
+def collect_codex_record(kind: str) -> int:
+  """Publish only the final Codex result; never the intermediate RPC error."""
+  collector = shutil.which("omarchy-agent-usage-codex")
+  if not collector:
+    print("Codex collector not found", file=sys.stderr)
+    return 1
+  args = [collector]
+  if kind == "force":
+    args.append("--force")
+  elif kind == "limits":
+    args.append("--limits-only")
+  try:
+    output = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            check=True, timeout=60).stdout
+    if not output or len(output) > MAX_USAGE_RECORD_BYTES:
+      raise ValueError("empty or oversized Codex report")
+    record = json.loads(output)
+    if not isinstance(record, dict) or record.get("id") != "codex":
+      raise ValueError("invalid Codex report")
+    status = str(record.get("usageStatusText") or "")
+    if not record.get("limits") and status in ("", "Codex limits unavailable"):
+      # The stock collector's text-buffer/select race may discard a reply.
+      # Recover it while the previous successful report remains on disk.
+      record.update(fetch_codex_limit_windows())
+      record["usageStatusText"] = ""
+      record["authHelpText"] = ""
+    write_json(usage_dir() / "codex.json", record, mode=0o600)
+    return 0
+  except (OSError, ValueError, OverflowError, subprocess.SubprocessError) as error:
+    print(f"Codex report refresh failed: {error}", file=sys.stderr)
+    return 1
+
+
 def main() -> int:
   parser = argparse.ArgumentParser(description="Print the Grok usage record as JSON")
   parser.add_argument("--force", action="store_true", help="rescan sessions and re-probe billing, ignoring caches")
@@ -1235,7 +1268,11 @@ def main() -> int:
   parser.add_argument("--load-snapshots", metavar="DIR", help="bounded no-follow snapshot merge inputs")
   parser.add_argument("--repair-codex", action="store_true", help="recover fresh Codex limits after a stock collector RPC failure")
   parser.add_argument("--write-snapshot", nargs=2, metavar=("DIR", "NAME"), help="publish bounded JSON from stdin without following symlinks")
+  parser.add_argument("--collect-codex", choices=("normal", "limits", "force"), help="collect and recover Codex before publishing one final report")
   args = parser.parse_args()
+
+  if args.collect_codex:
+    return collect_codex_record(args.collect_codex)
 
   if args.write_snapshot:
     try:
