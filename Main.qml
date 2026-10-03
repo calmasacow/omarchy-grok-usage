@@ -440,7 +440,6 @@ Item {
   readonly property string syncEffectiveDir: expandPath(syncDir)
   readonly property string syncEffectiveFileName: safeSnapshotFileName(syncFileName, syncDeviceId)
   readonly property string syncEffectiveDeviceId: safeDeviceId(syncDeviceId || syncEffectiveFileName.replace(/\.json$/i, ""))
-  readonly property string syncSnapshotPath: syncConfigured() ? syncEffectiveDir + "/" + syncEffectiveFileName : home + "/.cache/omarchy/agents-disabled.json"
   property var aggregateData: ({})
   property int syncRevision: 0
   property bool syncRunning: false
@@ -461,16 +460,27 @@ Item {
   }
 
   Process {
-    id: syncMkdirProcess
+    id: syncWriteProcess
+    property string snapshot: ""
     running: false
+    stdinEnabled: true
     onRunningChanged: root.updateSyncRunning()
+    onStarted: {
+      write(snapshot)
+      snapshot = ""
+      stdinEnabled = false
+    }
     onExited: function(exitCode) {
       if (exitCode !== 0) {
-        if (root.syncConfigured()) root.syncStatusText = "Usage sync mkdir failed"
+        if (root.syncConfigured()) root.syncStatusText = "Usage sync write failed"
         root.finishSyncRun()
         return
       }
-      root.writeSyncSnapshot()
+      root.startSyncScan()
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") console.warn("agents/sync", text.trim())
     }
   }
 
@@ -510,15 +520,6 @@ Item {
   }
 
   FileView {
-    id: syncSnapshotFile
-    path: root.syncSnapshotPath
-    watchChanges: false
-    preload: false
-    atomicWrites: true
-    printErrors: false
-  }
-
-  FileView {
     id: hostnameFile
     path: "/etc/hostname"
     watchChanges: false
@@ -549,7 +550,7 @@ Item {
   }
 
   function updateSyncRunning() {
-    root.syncRunning = syncMkdirProcess.running || syncScanProcess.running
+    root.syncRunning = syncWriteProcess.running || syncScanProcess.running
   }
 
   function scheduleSync() {
@@ -566,17 +567,15 @@ Item {
 
     syncRequestedWhileRunning = false
     syncStatusText = ""
-    syncMkdirProcess.command = ["mkdir", "-p", root.syncEffectiveDir]
-    syncMkdirProcess.running = true
-  }
-
-  function writeSyncSnapshot() {
-    if (!syncConfigured()) {
+    if (root.grokCollector === "") {
+      syncStatusText = "Usage sync helper unavailable"
       finishSyncRun()
       return
     }
-    syncSnapshotFile.setText(JSON.stringify(localSnapshot(), null, 2) + "\n")
-    Qt.callLater(root.startSyncScan)
+    syncWriteProcess.snapshot = JSON.stringify(localSnapshot()) + "\n"
+    syncWriteProcess.command = ["python3", "-B", root.grokCollector, "--write-snapshot", root.syncEffectiveDir, root.syncEffectiveFileName]
+    syncWriteProcess.stdinEnabled = true
+    syncWriteProcess.running = true
   }
 
   function startSyncScan() {

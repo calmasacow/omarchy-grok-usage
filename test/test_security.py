@@ -6,6 +6,10 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import os
+import json
+import subprocess
+import sys
+from unittest.mock import patch
 import tempfile
 import unittest
 import urllib.error
@@ -178,6 +182,123 @@ class FileTrustTests(unittest.TestCase):
     self.assertFalse(mod.is_safe_agent_id("grok/json"))
     self.assertFalse(mod.is_safe_agent_id("-dash"))
     self.assertFalse(mod.is_safe_agent_id("a" * 65))
+
+
+class SnapshotPublishTests(unittest.TestCase):
+  def setUp(self):
+    self.tmp = tempfile.TemporaryDirectory()
+    self.addCleanup(self.tmp.cleanup)
+    self.root = Path(self.tmp.name)
+    self.sync = self.root / "sync"
+    self.sync.mkdir()
+    self.target = self.root / "outside.json"
+    self.target.write_text("must survive")
+    self.payload = {"deviceId": "host", "providers": {"grok": {"todayPrompts": 2}}}
+
+  def publish(self, name="host.json"):
+    mod.write_sync_snapshot(self.sync, name, self.payload)
+
+  def test_snapshot_symlink_target_unchanged(self):
+    snapshot = self.sync / "host.json"
+    snapshot.symlink_to(self.target)
+    self.publish()
+    self.assertEqual(self.target.read_text(), "must survive")
+    self.assertFalse(snapshot.is_symlink())
+    self.assertEqual(json.loads(snapshot.read_text()), self.payload)
+    self.assertEqual(snapshot.stat().st_mode & 0o777, 0o600)
+
+  def test_dangling_symlink_does_not_create_outside_file(self):
+    missing = self.root / "missing"
+    (self.sync / "host.json").symlink_to(missing)
+    self.publish()
+    self.assertFalse(missing.exists())
+    self.assertEqual(json.loads((self.sync / "host.json").read_text()), self.payload)
+
+  def test_hardlink_target_unchanged(self):
+    os.link(self.target, self.sync / "host.json")
+    self.publish()
+    self.assertEqual(self.target.read_text(), "must survive")
+
+  def test_repeated_publish_and_new_directories(self):
+    self.sync = self.root / "new" / "nested"
+    self.publish()
+    self.payload["providers"]["grok"]["todayPrompts"] = 3
+    self.publish()
+    self.assertEqual(json.loads((self.sync / "host.json").read_text()), self.payload)
+    self.assertEqual([p.name for p in self.sync.iterdir()], ["host.json"])
+
+  def test_sync_directory_symlink_rejected(self):
+    linked = self.root / "linked"
+    linked.symlink_to(self.sync, target_is_directory=True)
+    self.sync = linked
+    with self.assertRaises(OSError):
+      self.publish()
+    self.assertFalse((linked / "host.json").exists())
+
+  def test_ancestor_symlink_rejected(self):
+    linked = self.root / "linked"
+    linked.symlink_to(self.sync, target_is_directory=True)
+    self.sync = linked / "nested"
+    with self.assertRaises(OSError):
+      self.publish()
+    self.assertFalse((self.root / "sync" / "nested").exists())
+
+  def test_directory_replaced_during_publication(self):
+    outside = self.root / "outside"
+    outside.mkdir()
+    victim = outside / "host.json"
+    victim.write_text("must survive")
+    pinned = self.root / "original-sync"
+    real_replace = os.replace
+    def replace_after_swap(src, dst, **kwargs):
+      self.sync.rename(pinned)
+      self.sync.symlink_to(outside, target_is_directory=True)
+      return real_replace(src, dst, **kwargs)
+    with patch.object(mod.os, "replace", side_effect=replace_after_swap):
+      self.publish()
+    self.assertEqual(victim.read_text(), "must survive")
+    self.assertEqual(json.loads((pinned / "host.json").read_text()), self.payload)
+    self.assertEqual([p.name for p in pinned.iterdir()], ["host.json"])
+
+  def test_destination_replaced_immediately_before_rename(self):
+    real_replace = os.replace
+    def replace_after_swap(src, dst, **kwargs):
+      (self.sync / "host.json").symlink_to(self.target)
+      return real_replace(src, dst, **kwargs)
+    with patch.object(mod.os, "replace", side_effect=replace_after_swap):
+      self.publish()
+    self.assertEqual(self.target.read_text(), "must survive")
+    self.assertFalse((self.sync / "host.json").is_symlink())
+
+  def test_temp_collision_does_not_follow_or_delete_symlink(self):
+    temp = self.sync / (".host.json." + "00" * 12 + ".tmp")
+    temp.symlink_to(self.target)
+    with patch.object(mod.os, "urandom", return_value=bytes(12)):
+      with self.assertRaises(FileExistsError):
+        self.publish()
+    self.assertEqual(self.target.read_text(), "must survive")
+    self.assertTrue(temp.is_symlink())
+
+  def test_failed_rename_cleans_temporary_file(self):
+    (self.sync / "host.json").mkdir()
+    with self.assertRaises(OSError):
+      self.publish()
+    self.assertEqual([p.name for p in self.sync.iterdir()], ["host.json"])
+
+  def test_invalid_filename_rejected(self):
+    for name in ["../outside.json", "/outside.json", "..", ".hidden.json", "bad/name.json", "a" * 101 + ".json"]:
+      with self.subTest(name=name), self.assertRaises(ValueError):
+        self.publish(name)
+    self.assertEqual(self.target.read_text(), "must survive")
+
+  def test_cli_publishes_and_rejects_bad_input(self):
+    command = [sys.executable, str(SCRIPT), "--write-snapshot", str(self.sync), "host.json"]
+    result = subprocess.run(command, input=json.dumps(self.payload), text=True, capture_output=True)
+    self.assertEqual(result.returncode, 0, result.stderr)
+    for raw in ["{bad", "[]", '{"providers":[]}', "x" * (mod.MAX_SNAPSHOT_BYTES + 1)]:
+      result = subprocess.run(command, input=raw, text=True, capture_output=True)
+      self.assertEqual(result.returncode, 1, result.stderr)
+      self.assertEqual(json.loads((self.sync / "host.json").read_text()), self.payload)
 
 
 class ParseLimitsTests(unittest.TestCase):

@@ -334,6 +334,65 @@ def write_json(path: Path, payload: dict[str, Any], mode: int = 0o644) -> None:
     raise
 
 
+def open_sync_directory(path: Path) -> int:
+  """Create/open each component without following links; return a pinned fd."""
+  if not path.is_absolute() or ".." in path.parts:
+    raise ValueError("sync directory must be an absolute path without traversal")
+  flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+  fd = os.open("/", flags)
+  try:
+    for part in path.parts[1:]:
+      try:
+        next_fd = os.open(part, flags, dir_fd=fd)
+      except FileNotFoundError:
+        try:
+          os.mkdir(part, mode=0o700, dir_fd=fd)
+        except FileExistsError:
+          pass
+        next_fd = os.open(part, flags, dir_fd=fd)
+      os.close(fd)
+      fd = next_fd
+    return fd
+  except BaseException:
+    os.close(fd)
+    raise
+
+
+def write_sync_snapshot(directory: Path, name: str, payload: dict[str, Any]) -> None:
+  """Replace the snapshot entry, never its symlink target, in a pinned folder."""
+  if (not name or len(name) > 100 or not name.endswith(".json")
+      or not name[0].isalnum() or ".." in name
+      or any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-" for c in name)):
+    raise ValueError("invalid snapshot filename")
+  if not isinstance(payload, dict) or not isinstance(payload.get("providers"), dict):
+    raise ValueError("invalid snapshot object")
+  raw = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
+  if len(raw) > MAX_SNAPSHOT_BYTES:
+    raise ValueError("snapshot too large")
+  dir_fd = open_sync_directory(directory)
+  tmp = f".{name}.{os.urandom(12).hex()}.tmp"
+  created = False
+  try:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                 0o600, dir_fd=dir_fd)
+    created = True
+    with os.fdopen(fd, "wb") as stream:
+      stream.write(raw)
+      stream.flush()
+      os.fsync(stream.fileno())
+    # renameat replaces a destination symlink itself, without resolving it.
+    os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    created = False
+    os.fsync(dir_fd)
+  finally:
+    if created:
+      try:
+        os.unlink(tmp, dir_fd=dir_fd)
+      except FileNotFoundError:
+        pass
+    os.close(dir_fd)
+
+
 def read_fresh_json(path: Path, max_age_seconds: float) -> dict[str, Any] | None:
   if max_age_seconds <= 0:
     return None
@@ -1101,7 +1160,20 @@ def main() -> int:
   parser.add_argument("--list-usage", metavar="DIR", help="list safe usage-record ids in a directory")
   parser.add_argument("--load-snapshots", metavar="DIR", help="bounded no-follow snapshot merge inputs")
   parser.add_argument("--repair-codex", action="store_true", help="clear a known false-positive Codex limits error")
+  parser.add_argument("--write-snapshot", nargs=2, metavar=("DIR", "NAME"), help="publish bounded JSON from stdin without following symlinks")
   args = parser.parse_args()
+
+  if args.write_snapshot:
+    try:
+      raw = sys.stdin.buffer.read(MAX_SNAPSHOT_BYTES + 1)
+      if len(raw) > MAX_SNAPSHOT_BYTES:
+        raise ValueError("snapshot too large")
+      payload = json.loads(raw.decode("utf-8"))
+      write_sync_snapshot(Path(args.write_snapshot[0]), args.write_snapshot[1], payload)
+    except (OSError, ValueError) as error:
+      print(f"Usage sync write failed: {error}", file=sys.stderr)
+      return 1
+    return 0
 
   if args.load_json:
     data = load_json_file(Path(args.load_json), MAX_USAGE_RECORD_BYTES)

@@ -7,7 +7,7 @@ Grok on the Omarchy agents panel. Opens on your default coding agent.
 **ID:** `calmasacow.grok-usage`  
 **Author:** James Barnette  
 **License:** MIT  
-**Version:** 0.3.5
+**Version:** 0.3.6
 
 Stock Omarchy already shows Claude, Codex, and Fireworks on the robot-head
 Agents widget. This plugin is that same panel (the bar icon stays the robot
@@ -80,6 +80,12 @@ requests stay on `cli-chat-proxy.grok.com` and refuse cross-origin redirects
 so the Grok token is not forwarded. Usage files are opened as regular files
 with a size cap (`O_NOFOLLOW`); QML never FileView-reads them. No tokens are
 stored in this repository.
+
+Optional usage sync publishes snapshots through the Python helper. It opens
+each sync-directory component without following symlinks, pins the directory
+with a file descriptor, and atomically replaces the snapshot entry rather than
+following its symlink target. Snapshot input is bounded and files use mode 0600.
+Sync folders containing symlink components are rejected.
 
 | File | Role |
 |---|---|
