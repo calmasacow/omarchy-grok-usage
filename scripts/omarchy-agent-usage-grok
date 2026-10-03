@@ -1168,7 +1168,7 @@ def fetch_codex_limit_windows() -> dict[str, Any]:
   try:
     buffer = bytearray()
     codex_rpc_request(proc, 1, "initialize", {
-      "clientInfo": {"name": "omarchy-grok-usage", "version": "0.3.7"}
+      "clientInfo": {"name": "omarchy-grok-usage", "version": "0.3.8"}
     }, buffer)
     proc.stdin.write(b'{"method":"initialized","params":{}}\n')
     proc.stdin.flush()

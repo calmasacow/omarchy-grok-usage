@@ -163,6 +163,7 @@ Item {
       agentId: modelData
       path: root.usageRecordPath(modelData)
       reader: root.grokCollector
+      deferRecord: modelData === "codex" && updateProcess.running
       onRecordChanged: root.recordsChanged()
     }
 
