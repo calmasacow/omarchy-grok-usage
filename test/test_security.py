@@ -301,6 +301,80 @@ class SnapshotPublishTests(unittest.TestCase):
       self.assertEqual(json.loads((self.sync / "host.json").read_text()), self.payload)
 
 
+class CodexLimitsTests(unittest.TestCase):
+  def setUp(self):
+    self.tmp = tempfile.TemporaryDirectory()
+    self.addCleanup(self.tmp.cleanup)
+    self.root = Path(self.tmp.name)
+    self.windows = {"planType": "plus", "primary": {"usedPercent": 10, "windowDurationMins": 300, "resetsAt": 1791027153},
+                    "secondary": {"usedPercent": 4, "windowDurationMins": 10080, "resetsAt": 1791580264}}
+
+  def fixture(self, response, split=False):
+    exe = self.root / "codex"
+    exe.write_text("#!" + sys.executable + "\n" + "import sys,json,time\n" +
+      "response = " + repr(response) + "\n" +
+      "for line in sys.stdin:\n" +
+      " req=json.loads(line)\n" +
+      " if req.get('method')=='initialize':\n" +
+      "  raw=(json.dumps({'id':req['id'],'result':{}})+'\\n'+json.dumps({'method':'notice','params':{}})+'\\n').encode()\n" +
+      " elif req.get('method')=='account/rateLimits/read':\n" +
+      "  raw=(json.dumps(dict(response,id=req['id']))+'\\n').encode()\n" +
+      " else: continue\n" +
+      (" sys.stdout.buffer.write(raw[:10]);sys.stdout.buffer.flush();time.sleep(0.01);raw=raw[10:]\n" if split else "") +
+      " sys.stdout.buffer.write(raw);sys.stdout.buffer.flush()\n")
+    exe.chmod(0o700)
+    return patch.object(mod.shutil, "which", return_value=str(exe))
+
+  def test_rpc_coalesced_notification_and_windows(self):
+    with self.fixture({"result": {"rateLimits": self.windows}}):
+      data = mod.fetch_codex_limit_windows()
+    self.assertEqual([x["label"] for x in data["limits"]], ["5h window", "Weekly (7-day)"])
+    self.assertEqual([x["percent"] for x in data["limits"]], [0.10, 0.04])
+    self.assertEqual(data["tierLabel"], "plus")
+
+  def test_rpc_split_frames_and_limit_id_mapping(self):
+    with self.fixture({"result": {"rateLimitsByLimitId": {"codex": self.windows}}}, split=True):
+      data = mod.fetch_codex_limit_windows()
+    self.assertEqual(len(data["limits"]), 2)
+
+  def test_rpc_error_and_empty_limits_rejected(self):
+    for response in [{"error": {"code": -1}}, {"result": {}}, {"result": {"rateLimits": {}}}]:
+      with self.subTest(response=response), self.fixture(response), self.assertRaises(ValueError):
+        mod.fetch_codex_limit_windows()
+
+  def test_rpc_bounded_output(self):
+    with self.fixture({"result": {"rateLimits": self.windows}}), patch.object(mod, "MAX_STDOUT_BYTES", 12):
+      with self.assertRaises(ValueError):
+        mod.fetch_codex_limit_windows()
+
+  def test_repair_restores_missing_windows(self):
+    path = self.root / "codex.json"
+    path.write_text(json.dumps({"id": "codex", "ready": True, "hasLocalStats": True, "limits": [],
+                               "todayPrompts": 42, "usageStatusText": "Codex limits unavailable", "authHelpText": "account/read"}))
+    with patch.object(mod, "usage_dir", return_value=self.root), self.fixture({"result": {"rateLimits": self.windows}}):
+      self.assertEqual(mod.repair_codex_record(), 0)
+    record = json.loads(path.read_text())
+    self.assertEqual(len(record["limits"]), 2)
+    self.assertEqual(record["todayPrompts"], 42)
+    self.assertEqual(record["usageStatusText"], "")
+    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+  def test_failed_recovery_preserves_error(self):
+    path = self.root / "codex.json"
+    original = json.dumps({"ready": True, "hasLocalStats": True, "limits": [], "usageStatusText": "Codex limits unavailable"})
+    path.write_text(original)
+    with patch.object(mod, "usage_dir", return_value=self.root), patch.object(mod, "fetch_codex_limit_windows", side_effect=OSError("offline")):
+      self.assertEqual(mod.repair_codex_record(), 1)
+    self.assertEqual(path.read_text(), original)
+
+  def test_valid_limits_do_not_trigger_extra_rpc(self):
+    path = self.root / "codex.json"
+    path.write_text(json.dumps({"ready": True, "hasLocalStats": True, "limits": [{"percent": 0.1}]}))
+    with patch.object(mod, "usage_dir", return_value=self.root), patch.object(mod, "fetch_codex_limit_windows") as fetch:
+      self.assertEqual(mod.repair_codex_record(), 0)
+      fetch.assert_not_called()
+
+
 class ParseLimitsTests(unittest.TestCase):
   def test_weekly_pool_and_product_segments(self):
     limits = mod.parse_limits({

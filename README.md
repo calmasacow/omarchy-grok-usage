@@ -7,7 +7,7 @@ Grok on the Omarchy agents panel. Opens on your default coding agent.
 **ID:** `calmasacow.grok-usage`  
 **Author:** James Barnette  
 **License:** MIT  
-**Version:** 0.3.6
+**Version:** 0.3.7
 
 Stock Omarchy already shows Claude, Codex, and Fireworks on the robot-head
 Agents widget. This plugin is that same panel (the bar icon stays the robot
@@ -92,6 +92,10 @@ Sync folders containing symlink components are rejected.
 | `Panel.qml` | Bar icon + usage dashboard |
 | `Main.qml` | Discover records, refresh collectors, prefer default agent |
 | `scripts/omarchy-agent-usage-grok` | Session scan + SuperGrok billing probe |
+
+Codex five-hour and weekly limits are recovered through a bounded app-server
+RPC read if the stock collector loses its response. Recovery uses fresh account
+limits and leaves collector errors visible if the retry fails.
 
 ## Requirements
 

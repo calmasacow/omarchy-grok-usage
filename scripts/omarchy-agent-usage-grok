@@ -24,6 +24,9 @@ import fcntl
 import json
 import os
 import stat
+import select
+import shutil
+import subprocess
 import sys
 import time
 import urllib.error
@@ -1126,26 +1129,97 @@ def load_text_file(path: Path, max_bytes: int) -> str:
   return line if is_safe_agent_id(line) else ""
 
 
-def repair_codex_record() -> int:
-  """Keep valid local Codex usage from rendering as a provider error.
+def codex_rpc_request(proc, request_id: int, method: str, params: dict[str, Any],
+                      buffer: bytearray, timeout: float = 8) -> dict[str, Any]:
+  """Frame pipe bytes ourselves so select never misses a text-buffered reply."""
+  proc.stdin.write((json.dumps({"id": request_id, "method": method, "params": params}) + "\n").encode())
+  proc.stdin.flush()
+  deadline = time.monotonic() + timeout
+  while True:
+    while b"\n" in buffer:
+      line, _, rest = buffer.partition(b"\n")
+      buffer[:] = rest
+      try:
+        message = json.loads(line)
+      except (ValueError, UnicodeError):
+        continue
+      if isinstance(message, dict) and message.get("id") == request_id:
+        if "error" in message or not isinstance(message.get("result"), dict):
+          raise ValueError("Codex RPC request failed: " + method)
+        return message["result"]
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not select.select([proc.stdout], [], [], remaining)[0]:
+      raise TimeoutError(method)
+    chunk = os.read(proc.stdout.fileno(), 65536)
+    if not chunk:
+      raise OSError("Codex RPC pipe closed")
+    buffer.extend(chunk)
+    if len(buffer) > MAX_STDOUT_BYTES:
+      raise ValueError("Codex RPC output too large")
 
-  Codex 0.156 can answer account/read while leaving the optional
-  account/rateLimits/read request unanswered. The stock collector writes that
-  transport detail into usageStatusText, which the agents panel renders as an
-  error card. Local usage and account information are still valid in this
-  case, so clear only that known false-positive state.
-  """
+
+def fetch_codex_limit_windows() -> dict[str, Any]:
+  codex = shutil.which("codex")
+  if not codex:
+    raise OSError("codex not found in PATH")
+  proc = subprocess.Popen([codex, "-s", "read-only", "-a", "on-request", "app-server"],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, bufsize=0)
+  try:
+    buffer = bytearray()
+    codex_rpc_request(proc, 1, "initialize", {
+      "clientInfo": {"name": "omarchy-grok-usage", "version": "0.3.7"}
+    }, buffer)
+    proc.stdin.write(b'{"method":"initialized","params":{}}\n')
+    proc.stdin.flush()
+    response = codex_rpc_request(proc, 2, "account/rateLimits/read", {}, buffer)
+    limits = response.get("rateLimits")
+    if not isinstance(limits, dict):
+      limits = (response.get("rateLimitsByLimitId") or {}).get("codex")
+    if not isinstance(limits, dict):
+      raise ValueError("Codex returned no rate limits")
+    windows = []
+    for window in [limits.get("primary"), limits.get("secondary")]:
+      if not isinstance(window, dict) or window.get("usedPercent") is None:
+        continue
+      percent = float(window["usedPercent"]) / 100
+      if not 0 <= percent <= 1:
+        raise ValueError("invalid Codex limit percentage")
+      minutes = int(window.get("windowDurationMins") or 0)
+      label = "Weekly (7-day)" if minutes == 10080 else (f"{minutes // 60}h window" if minutes and minutes % 60 == 0 else "Limit")
+      reset = window.get("resetsAt")
+      windows.append({"label": label, "percent": percent,
+                      "resetsAt": dt.datetime.fromtimestamp(int(reset), dt.timezone.utc).isoformat() if reset else ""})
+    if not windows:
+      raise ValueError("Codex returned no limit windows")
+    return {"limits": windows, "tierLabel": str(limits.get("planType") or "")}
+  finally:
+    proc.terminate()
+    try:
+      proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+      proc.kill()
+      proc.wait(timeout=1)
+    proc.stdin.close()
+    proc.stdout.close()
+
+
+def repair_codex_record() -> int:
+  """Recover fresh limits when the stock collector loses an RPC reply."""
   path = usage_dir() / "codex.json"
   record = read_json_object(path, MAX_USAGE_RECORD_BYTES)
-  if not isinstance(record, dict):
+  if (not isinstance(record, dict) or record.get("ready") is not True
+      or record.get("hasLocalStats") is not True or record.get("limits")):
     return 0
-  if (record.get("ready") is True
-      and record.get("hasLocalStats") is True
-      and record.get("usageStatusText") == "Codex limits unavailable"
-      and str(record.get("authHelpText") or "").startswith("account/read")):
-    record["usageStatusText"] = ""
-    record["authHelpText"] = ""
-    write_json(path, record, mode=0o600)
+  try:
+    fresh = fetch_codex_limit_windows()
+  except (OSError, ValueError, OverflowError) as error:
+    print(f"Codex limits recovery failed: {error}", file=sys.stderr)
+    return 1
+  record.update(fresh)
+  record["usageStatusText"] = ""
+  record["authHelpText"] = ""
+  write_json(path, record, mode=0o600)
   return 0
 
 
@@ -1159,7 +1233,7 @@ def main() -> int:
   parser.add_argument("--load-text", metavar="PATH", help="bounded no-follow single-line text read for QML")
   parser.add_argument("--list-usage", metavar="DIR", help="list safe usage-record ids in a directory")
   parser.add_argument("--load-snapshots", metavar="DIR", help="bounded no-follow snapshot merge inputs")
-  parser.add_argument("--repair-codex", action="store_true", help="clear a known false-positive Codex limits error")
+  parser.add_argument("--repair-codex", action="store_true", help="recover fresh Codex limits after a stock collector RPC failure")
   parser.add_argument("--write-snapshot", nargs=2, metavar=("DIR", "NAME"), help="publish bounded JSON from stdin without following symlinks")
   args = parser.parse_args()
 

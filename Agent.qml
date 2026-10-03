@@ -17,6 +17,7 @@ Item {
   property string _buf: ""
   property bool _overflow: false
   property int _loadGen: 0
+  property bool _reloadRequested: false
 
   FileView {
     path: root.path
@@ -30,6 +31,8 @@ Item {
     id: readProc
     running: false
     property int job: 0
+    property string sourcePath: ""
+    property string sourceReader: ""
     stdout: SplitParser {
       splitMarker: ""
       onRead: function(chunk) {
@@ -43,13 +46,15 @@ Item {
         root._buf += piece
       }
     }
-    onExited: {
-      if (readProc.job !== root._loadGen) return
-      if (root._overflow) {
-        root.record = null
-        return
+    onExited: function(exitCode) {
+      if (readProc.job === root._loadGen && readProc.sourcePath === root.path
+          && readProc.sourceReader === root.reader && exitCode === 0 && !root._overflow) {
+        root.parse(root._buf)
       }
-      root.parse(root._buf)
+      if (root._reloadRequested) {
+        root._reloadRequested = false
+        Qt.callLater(root.reloadBounded)
+      }
     }
   }
 
@@ -58,15 +63,22 @@ Item {
   onReaderChanged: root.reloadBounded()
 
   function reloadBounded() {
-    root._loadGen++
     if (root.reader === "" || root.path === "" || root.agentId === "") {
       root.record = null
       return
     }
+    // A watcher event can arrive while the helper is reading. Queue one more
+    // read instead of killing it and mistaking its incomplete output for JSON.
+    if (readProc.running) {
+      root._reloadRequested = true
+      return
+    }
+    root._loadGen++
     root._buf = ""
     root._overflow = false
-    if (readProc.running) readProc.running = false
     readProc.job = root._loadGen
+    readProc.sourcePath = root.path
+    readProc.sourceReader = root.reader
     readProc.command = ["python3", "-B", root.reader, "--load-json", root.path]
     readProc.running = true
   }
@@ -84,7 +96,6 @@ Item {
       root.record = record
     } catch (e) {
       console.warn("agents", "Ignoring bad usage record", root.path, e)
-      root.record = null
     }
   }
 }

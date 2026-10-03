@@ -382,16 +382,6 @@ Item {
     var deviceCount = synced ? Number(stats.deviceCount || aggregateData.deviceCount || 0) : 0
     var recordStatus = String(record.usageStatusText || "")
     var recordHelp = String(record.authHelpText || "")
-    // Codex 0.156 may report a valid account from account/read while its
-    // optional rate-limit RPC is unavailable. That transport detail is not a
-    // provider failure and must not render as the red status card.
-    if (String(record.id) === "codex" && record.ready === true
-        && record.hasLocalStats === true
-        && recordStatus === "Codex limits unavailable"
-        && recordHelp.indexOf("account/read") === 0) {
-      recordStatus = ""
-      recordHelp = ""
-    }
 
     return {
       providerId: String(record.id),
